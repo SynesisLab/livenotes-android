@@ -1,5 +1,6 @@
 package com.sinesislab.livenotes.ui
 
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -18,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ElevatedButton
@@ -110,29 +112,84 @@ fun RootScaffold(container: AppContainer) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ListScreen(container: AppContainer, onNew: () -> Unit, onOpen: (String) -> Unit, onSettings: () -> Unit) {
+    // batch management: HOLD a card to enter selection, tap toggles, delete
+    // asks through its own confirm screen (the desktop's confirm prompt
+    // pattern, sized for thumbs)
+    var selection by remember { mutableStateOf(emptySet<String>()) }
+    var confirming by remember { mutableStateOf(false) }
+    val inSelection = selection.isNotEmpty()
+
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("🎙 Live Notes", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onSettings) { Text("⚙ settings") }
+        if (inSelection) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                TextButton(onClick = { selection = emptySet() }) { Text("✕") }
+                Text("${selection.size} selected", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.weight(1f))
+                TextButton(
+                    onClick = { confirming = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("🗑 Delete") }
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🎙 Live Notes", style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onSettings) { Text("⚙ settings") }
+            }
         }
         Button(onClick = onNew, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text("＋ New recording") }
         container.sessions.all.forEach { s ->
-            ElevatedCard(onClick = { onOpen(s.slug) }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
-                Column(Modifier.padding(14.dp)) {
-                    Text(s.title, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        s.updatedAt.take(16).replace('T', ' '),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+            ElevatedCard(
+                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                content = {
+                    Box(
+                        Modifier
+                            .combinedClickable(
+                                onClick = { if (inSelection) selection = selection.toggle(s.slug) else onOpen(s.slug) },
+                                onLongClick = { selection = selection + s.slug },
+                            )
+                            .padding(14.dp)
+                    ) {
+                        Column {
+                            Text(
+                                (if (inSelection && s.slug in selection) "☑ " else if (inSelection) "☐ " else "") + s.title,
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            Text(
+                                s.updatedAt.take(16).replace('T', ' '),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                },
+            )
         }
     }
+    if (confirming) {
+        AlertDialog(
+            onDismissRequest = { confirming = false },
+            title = { Text("Delete ${selection.size} session${if (selection.size == 1) "" else "s"}?") },
+            text = { Text("Their transcripts, live notes and analyses will be deleted permanently. This cannot be undone.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        selection.forEach { container.sessions.delete(it) }
+                        selection = emptySet()
+                        confirming = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = Color.White),
+                ) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { confirming = false }) { Text("Cancel") } },
+        )
+    }
 }
+
+private fun Set<String>.toggle(v: String): Set<String> = if (v in this) this - v else this + v
 
 @Composable
 private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> Unit) {
@@ -140,6 +197,10 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
     val sessions = container.sessions
     var session by remember { mutableStateOf(if (slug.isBlank()) null else sessions.get(slug)) }
     var mode by remember { mutableStateOf(if (slug.isBlank()) "idle" else "ended") } // idle | recording | ended
+    // the back gesture follows the same rule as the back button: free to
+    // leave except mid-session (an accidental swipe shouldn't feel like it
+    // ended the recording — the service would happily keep recording anyway)
+    androidx.activity.compose.BackHandler(enabled = mode != "recording") { onBack() }
     var title by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val lines by CaptureBus.transcript.collectAsState()
@@ -516,6 +577,7 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
 
 @Composable
 private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
+    androidx.activity.compose.BackHandler { onBack() }
     val settings = container.settings
     // re-load the persisted model on entry — the engine state resets to IDLE
     // on every app launch, and only the capture service normally loads it;

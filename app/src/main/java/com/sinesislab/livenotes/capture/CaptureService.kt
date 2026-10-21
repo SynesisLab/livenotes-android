@@ -204,9 +204,13 @@ class CaptureService : Service() {
     override fun onDestroy() {
         running = false
         try { recordThread?.join(1000) } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
-        // One last transcription-independent tick so the tail of speech isn't
-        // left waiting for a beat that never comes — blocking, on the
-        // transcribe pool, because coroutines die with this scope.
+        // FIRE-AND-FORGET — the earlier teardown blocked on .get() here, and
+        // Service.onDestroy runs on the MAIN thread: if the pool was
+        // mid-inference or mid-AI-compile, the process froze solid until
+        // that call finished — the system timed out trying to collect its
+        // backtrace (ANR), and from the user's side the app stopped
+        // producing a transcript entirely. Nothing that expensive belongs
+        // on the main thread.
         try {
             transcribePool.submit {
                 // teardown note-compile honors the transcript-only toggle too
@@ -233,10 +237,9 @@ class CaptureService : Service() {
                     // the UI is gone by now; the material stays queued in the
                     // transcript file for the next analysis pass
                 }
-            }.get()
+            }
         } catch (e: Exception) {
-            /* service teardown must never wedge on a hung provider — the
-               hard timeout inside chatStreamBlocking bounds this already */
+            /* teardown must never wedge on a wedged pool */
         }
         transcribePool.shutdown()
         scope.cancel()
