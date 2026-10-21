@@ -80,6 +80,19 @@ class WhisperEngine(context: Context) {
      * be called from the main thread.
      */
     fun transcribe(samples: FloatArray): String {
+        // WAIT for a load to finish rather than dropping the utterance: a
+        // settings-page model selection lands mid-session (the engine flips
+        // through `loading`), and every utterance executing in that window
+        // used to see "not READY" and vanish — "(empty) in 0ms"
+        val deadline = System.currentTimeMillis() + 180_000
+        while (System.currentTimeMillis() < deadline) {
+            val s = _state.value.state
+            if (s == LoadState.DOWNLOADING || s == LoadState.LOADING) {
+                Thread.sleep(120)
+                continue
+            }
+            break
+        }
         if (_state.value.state != LoadState.READY) return ""
         val native = executor.submit<String> { WhisperJni.fullTranscribe(samples, SAMPLE_RATE, settings.whisperLanguage) }
         return try {

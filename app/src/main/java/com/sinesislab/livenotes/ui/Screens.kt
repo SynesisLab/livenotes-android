@@ -666,14 +666,16 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             WhisperEngine.LoadState.ERROR -> Text("⚠ ${engine.detail ?: "whisper needs attention"}", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp))
             WhisperEngine.LoadState.IDLE -> Text("model idle", modifier = Modifier.padding(top = 6.dp))
         }
-        // quality ladder — the big multilingual model listed FIRST (mishears
-        // of vocabulary were the base model's doing; the phone has the RAM)
+        // quality ladder — REAL-TIME-FIRST: on a phone CPU the small, fast
+        // model IS the recommendation (near-large accuracy belongs to
+        // desktop-class hardware; the 547 MB turbo ran ~87 s per 10 s of
+        // speech on a flagship device)
         val hf = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
         listOf(
-            "ggml-large-v3-turbo-q5_0.bin" to "Best — multilingual (547 MB)",
-            "ggml-base-q5_1.bin" to "Starter — multilingual (57 MB)",
-            "ggml-small.en.bin" to "Middle — English only (465 MB)",
-            "ggml-base.en-q5_1.bin" to "Starter — English only (57 MB)",
+            "ggml-base-q5_1.bin" to "Fast — multilingual, realtime (57 MB)",
+            "ggml-small.en.bin" to "Middle — English only (465 MB, less realtime)",
+            "ggml-large-v3-turbo-q5_0.bin" to "Highest quality — slow on a phone (547 MB)",
+            "ggml-base.en-q5_1.bin" to "Fast — English only (57 MB)",
         ).forEach { (fileName, label) ->
             val active = currentModel == fileName
             ElevatedButton(
