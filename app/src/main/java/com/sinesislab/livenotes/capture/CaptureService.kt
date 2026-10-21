@@ -19,6 +19,7 @@ import com.sinesislab.livenotes.NotesApp
 import com.sinesislab.livenotes.R
 import com.sinesislab.livenotes.ai.CloudAi
 import com.sinesislab.livenotes.ai.Prompts
+import com.sinesislab.livenotes.stt.CloudStt
 import com.sinesislab.livenotes.store.TsLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,8 +33,10 @@ import java.util.concurrent.Executors
 /**
  * The app's core loop — a foreground service so capture + transcription
  * survive the screen turning off (the advantage the PWA never had). One
- * service owns: AudioRecord 16 kHz capture → RMS VAD → on-device whisper →
- * transcript lines → cloud AI live notes every ~20 s. Everything persists
+ * service owns: AudioRecord 16 kHz capture → RMS VAD → realtime-first STT
+ * (cloud upload when switched on, on-device whisper otherwise/fallback) →
+ * transcript lines → cloud AI live notes every ~20 s, with the raw audio
+ * also streaming to recording.wav the whole time. Everything persists
  * under filesDir/data (SessionStore) in the desktop's layout, so a future
  * sync path can hand sessions over untouched.
  */
@@ -42,6 +45,7 @@ class CaptureService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val transcribePool = Executors.newSingleThreadExecutor()
     private var recordThread: Thread? = null
+    private var recording: RecordingWriter? = null
     @Volatile private var running = false
     private var slug = ""
     private var notesJob: Job? = null
@@ -86,6 +90,9 @@ class CaptureService : Service() {
     /// The AI notes are the DECOUPLED path: the ticker only acts once a
     /// couple of lines have piled up, so the model's slowness can never hold
     /// back speech-to-text.
+    /// And the recording is the LOSSLESS path: every 80 ms frame streams to
+    /// recording.wav right here on the record loop — whisper and the cloud
+    /// never gate the on-disk audio.
     private val lines = mutableListOf<TsLine>()
 
     private fun startCapture() {
@@ -96,13 +103,35 @@ class CaptureService : Service() {
         val vad = Vad { samples, spokenAt ->
             transcribePool.execute {
                 val t0 = System.currentTimeMillis()
-                val text = app.container.whisper.transcribe(samples)
+                val settings = app.container.settings
+                // REALTIME-FIRST LADDER: cloud STT when switched on (a ~1 s
+                // round trip per utterance); any miss — no network, bad key,
+                // wrong host — falls through to on-device whisper, which also
+                // waits out a mid-session model load
+                var src = "whisper"
+                var text = ""
+                if (settings.cloudSttEnabled && settings.cloud.api == "openai") {
+                    text = try {
+                        CloudStt.transcribe(
+                            samples, RATE,
+                            baseUrl = settings.cloud.baseUrl,
+                            apiKey = settings.apiKey,
+                            model = settings.cloudSttModel,
+                            language = settings.whisperLanguage,
+                        )
+                    } catch (e: Exception) {
+                        android.util.Log.d("livenotes", "cloud stt miss: ${e.message?.take(200)}")
+                        ""
+                    }
+                    if (text.isNotEmpty()) src = "cloud"
+                }
+                if (text.isEmpty()) text = app.container.whisper.transcribe(samples)
                 // instrument the live path: if speech stops becoming text, the
-                // log answers WHERE — no utterance at all, empty inference, or
-                // a slow one
+                // log answers WHERE — no utterance at all, empty inference, a
+                // slow one, or which rung answered
                 android.util.Log.d(
                     "livenotes",
-                    "utterance ${"%.1f".format(samples.size / 16_000f)}s spoken@${spokenAt} inf=${System.currentTimeMillis() - t0}ms -> ${if (text.isEmpty()) "(empty)" else text.take(60)}",
+                    "utterance ${"%.1f".format(samples.size / 16_000f)}s spoken@${spokenAt} src=$src inf=${System.currentTimeMillis() - t0}ms -> ${if (text.isEmpty()) "(empty)" else text.take(60)}",
                 )
                 if (text.isNotEmpty()) {
                     val line = app.container.sessions.appendLine(slug, text, spokenAt)
@@ -129,12 +158,23 @@ class CaptureService : Service() {
             return
         }
         running = true
+        // record the voices: everything the VAD hears also streams to
+        // recording.wav. A failed open or a dead file never stops the STT
+        // paths — this session just transcribes without a replayable audio.
+        val writer = RecordingWriter(app.container.sessions.recordingFile(slug), RATE)
+        if (writer.open()) {
+            recording = writer
+            CaptureBus.recording.value = RecordingLive(System.currentTimeMillis())
+        } else {
+            CaptureBus.errors.tryEmit("Audio recording failed to open — transcribing without one.")
+        }
         record.startRecording()
         val loop = Runnable {
             val buf = ShortArray(FRAME_SAMPLES)
             while (running) {
                 val n = record.read(buf, 0, FRAME_SAMPLES)
                 if (n <= 0) continue
+                recording?.append(buf, n)
                 val f32 = FloatArray(n)
                 for (i in 0 until n) f32[i] = buf[i] / 32768f
                 // wall clock: the VAD stamps spoken-at epochs, which become the
@@ -144,6 +184,9 @@ class CaptureService : Service() {
             vad.flush(System.currentTimeMillis())
             record.stop()
             record.release()
+            // normal exit patches-and-closes here; a teardown that lands
+            // while the loop is still running is covered again in onDestroy
+            recording?.finish()
         }
         recordThread = Thread(loop, "livenotes-capture").also { it.start() }
     }
@@ -212,6 +255,12 @@ class CaptureService : Service() {
     override fun onDestroy() {
         running = false
         try { recordThread?.join(1000) } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
+        // the loop's own finish covers the normal stop; this catch-all lands
+        // the header when the join timed out or the loop died — patchHeader
+        // re-derives lengths from the file, so a second call is free
+        try { recording?.finish() } catch (e: Exception) {}
+        recording = null
+        CaptureBus.recording.value = null
         // FIRE-AND-FORGET — the earlier teardown blocked on .get() here, and
         // Service.onDestroy runs on the MAIN thread: if the pool was
         // mid-inference or mid-AI-compile, the process froze solid until

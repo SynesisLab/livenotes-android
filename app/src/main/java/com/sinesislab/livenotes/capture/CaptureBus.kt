@@ -7,6 +7,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 /** What a live AI-notes tick streams vs the settled state after a tick. */
 data class AutoNotesState(val content: String, val updatedAtEpoch: Long?, val busy: Boolean)
 
+/** State of the audio being recorded: when the stream opened (its file lives
+ *  at SessionStore.recordingFile(slug)). */
+data class RecordingLive(val startedAtEpoch: Long)
+
 /**
  * The service → UI channel: a session recording pushes its transcript lines
  * and notes state here; Compose screens collect these instead of holding
@@ -19,5 +23,8 @@ object CaptureBus {
      *  service skips the AI ticker and the UI hides the notes pane. */
     val notesEnabled = MutableStateFlow(true)
     val notesStreaming = MutableSharedFlow<String>(extraBufferCapacity = 64, replay = 1)
+    /** Non-null while a capture runs — the session's audio is streaming into
+     *  recording.wav; screens show the ⏺ elapsed clock from startedAtEpoch. */
+    val recording = MutableStateFlow<RecordingLive?>(null)
     val errors = MutableSharedFlow<String>(extraBufferCapacity = 16, replay = 1)
 }

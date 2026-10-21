@@ -73,6 +73,17 @@ class AppSettings(context: Context) {
     var whisperLanguage: String
         get() = prefs.getString("whisper.language", "auto") ?: "auto"
         set(value) = prefs.edit().putString("whisper.language", value).apply()
+
+    /** Step 1 of the realtime ladder: ON = utterances try cloud
+     *  /audio/transcriptions first and fall to whisper on any miss. */
+    var cloudSttEnabled: Boolean
+        get() = prefs.getBoolean("cloudStt.enabled", false)
+        set(value) = prefs.edit().putBoolean("cloudStt.enabled", value).apply()
+
+    /** Model name sent with transcription uploads (whisper-1 for OpenAI). */
+    var cloudSttModel: String
+        get() = prefs.getString("cloudStt.model", "whisper-1") ?: "whisper-1"
+        set(value) = prefs.edit().putString("cloudStt.model", value).apply()
 }
 
 /** AES/GCM at-rest wrap; the master key never leaves the Keystore. */

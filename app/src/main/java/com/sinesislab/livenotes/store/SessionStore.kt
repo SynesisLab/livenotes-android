@@ -21,6 +21,7 @@ data class TsLine(val t: String, val text: String)
  *     latest.txt                    plain-text mirror
  *     autonotes.md                  the AI's growing live-notes bullets
  *     analysis.md + analysis-N.md   re-analysis runs (runs are KEPT; .md is the latest)
+ *     recording.wav               the session's audio, streamed whole-session
  */
 class SessionStore(context: Context) {
     private val root = File(context.filesDir, "data")
@@ -125,6 +126,10 @@ class SessionStore(context: Context) {
     fun transcriptText(slug: String): String = transcriptLines(slug).joinToString("\n") { it.text }
 
     val autonotesFile: (String) -> File = { slug -> File(sessionsDir, "$slug/autonotes.md") }
+
+    /** The session's audio itself — the capture service streams the whole
+     *  session here ("record the voices", not just transcribe them). */
+    fun recordingFile(slug: String): File = File(sessionsDir, "$slug/recording.wav")
 
     fun loadAutonotes(slug: String): String = try {
         autonotesFile(slug).readText().trim()

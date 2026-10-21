@@ -26,12 +26,16 @@ import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -54,17 +58,19 @@ import com.sinesislab.livenotes.ai.Prompts
 import com.sinesislab.livenotes.capture.AutoNotesState
 import com.sinesislab.livenotes.capture.CaptureBus
 import com.sinesislab.livenotes.capture.CaptureService
+import com.sinesislab.livenotes.capture.RecordingWriter
 import com.sinesislab.livenotes.stt.WhisperEngine
 import com.sinesislab.livenotes.store.SessionStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
  * Minimal screens: list → session (record → live transcript + AI notes →
- * stop) → settings (cloud AI + whisper model). Re-analysis UI is the next
- * milestone (its prompts + storage already ship in this repo — see README).
+ * stop → transcript/notes/analysis/audio tabs) → settings (cloud AI,
+ * speech-to-text engine, whisper model).
  */
 
 @Composable
@@ -206,6 +212,7 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
     val lines by CaptureBus.transcript.collectAsState()
     val notes by CaptureBus.notes.collectAsState()
     val engine by container.whisper.state.collectAsState()
+    val recordingLive by CaptureBus.recording.collectAsState()
 
     // entering an existing session: the files fill the bus
     LaunchedEffect(session?.slug) {
@@ -223,12 +230,19 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                 maxLines = 1,
             )
             Spacer(Modifier.weight(1f))
-            val chip = when (engine.state) {
+            val base = when (engine.state) {
                 WhisperEngine.LoadState.READY -> "🔒 whisper ready"
                 WhisperEngine.LoadState.DOWNLOADING -> "⤓ ${engine.progress}%"
                 WhisperEngine.LoadState.LOADING -> "loading…"
                 WhisperEngine.LoadState.ERROR -> "⚠ whisper"
                 WhisperEngine.LoadState.IDLE -> "whisper"
+            }
+            // cloud STT switched on: the chip names both rungs — the upload is
+            // the realtime answer, the loaded engine is its fallback
+            val chip = if (container.settings.cloudSttEnabled && container.settings.cloud.api == "openai") {
+                "☁ realtime — $base"
+            } else {
+                base
             }
             Text(chip, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         }
@@ -272,6 +286,8 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 ) { Text(if (notesEnabled) "✨ live notes ON" else "📝 transcript only", style = MaterialTheme.typography.labelMedium) }
                 Spacer(Modifier.weight(1f))
+                // the ⏺ clock: the session's audio-recording, surfaced live
+                recordingLive?.let { RecordingClock(it.startedAtEpoch, Modifier.padding(start = 8.dp)) }
             }
             if (notesEnabled) {
                 // weight-constrained panes: an unbounded LazyColumn child grows
@@ -347,8 +363,9 @@ private fun LiveTranscriptPane(modifier: Modifier = Modifier) {
 }
 
 /** Ended-state tabs: the full timestamped transcript, the AI's live notes,
- *  and the ✨ comprehensive re-analysis (streamed; runs kept as files). Each
- *  of transcript/notes exports via the system share-sheet. */
+ *  the ✨ comprehensive re-analysis (streamed; runs kept as files), and the
+ *  session's own recording (▶ Audio). Each exports via the share-sheet —
+ *  the audio as an actual .wav file. */
 @Composable
 private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
     var tab by remember { mutableStateOf("transcript") }
@@ -358,6 +375,7 @@ private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier 
                 "transcript" to "Transcript",
                 "notes" to "Live notes",
                 "analysis" to "✨ Analysis",
+                "audio" to "▶ Audio",
             ).forEach { (key, label) ->
                 ElevatedButton(onClick = { tab = key }, enabled = tab != key) { Text(label, style = MaterialTheme.typography.labelMedium) }
             }
@@ -373,6 +391,7 @@ private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier 
                 ExportRow(container, slug, kind = "notes")
             }
             "analysis" -> AnalysisPane(container, slug, Modifier.weight(1f).padding(top = 10.dp))
+            "audio" -> AudioPane(container, slug, Modifier.weight(1f).padding(top = 10.dp))
         }
     }
 }
@@ -445,28 +464,42 @@ private fun MarkdownBlock(text: String, modifier: Modifier = Modifier) {
  * Export as an actual file (a phone's share sheet with a raw text blob is
  * useless — the ask was "a text file"): transcript → .txt (keeps the
  * HH:MM stamps), AI notes / analysis → .md (they're markdown docs by
- * contract). Shares the written file through FileProvider so Drive/Notes/
- * chat apps can receive it as a document.
+ * contract), the session's audio → the real .wav. Shares the written file
+ * through FileProvider so Drive/Notes/chat apps can receive it as a document.
  */
 private fun exportAsFile(context: android.content.Context, container: AppContainer, slug: String, kind: String) {
-    val text = when (kind) {
-        "transcript" -> container.sessions.transcriptText(slug)
-        "notes" -> container.sessions.loadAutonotes(slug)
-        else -> container.sessions.loadAnalysis(slug).second
-    }
-    if (text.isBlank()) return
     val prettyTitle = container.sessions.get(slug)?.title ?: slug
     val safeName = prettyTitle.lowercase().map { if (it.isLetterOrDigit() && it.code < 128) it else '-' }
         .joinToString("").foldToSingleDash().trim('-').take(60).ifBlank { "session" }
     val dir = File(context.cacheDir, "exports").apply { mkdirs() }
-    val file = File(dir, "$safeName-$kind.${if (kind == "transcript") "txt" else "md"}")
-    file.writeText(text)
+    val file: File
+    var mime = "text/plain"
+    when (kind) {
+        // the recording is binary — a copy of the real file goes to the sheet
+        "recording" -> {
+            val src = container.sessions.recordingFile(slug)
+            if (!src.isFile) return
+            file = File(dir, "$safeName-recording.wav")
+            src.copyTo(file, overwrite = true)
+            mime = "audio/wav"
+        }
+        else -> {
+            val text = when (kind) {
+                "transcript" -> container.sessions.transcriptText(slug)
+                "notes" -> container.sessions.loadAutonotes(slug)
+                else -> container.sessions.loadAnalysis(slug).second
+            }
+            if (text.isBlank()) return
+            file = File(dir, "$safeName-$kind.${if (kind == "transcript") "txt" else "md"}")
+            file.writeText(text)
+        }
+    }
     val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
     try {
         context.startActivity(
             android.content.Intent.createChooser(
                 android.content.Intent(android.content.Intent.ACTION_SEND)
-                    .setType("text/plain")
+                    .setType(mime)
                     .putExtra(android.content.Intent.EXTRA_STREAM, uri)
                     .putExtra(android.content.Intent.EXTRA_SUBJECT, "$prettyTitle — $kind")
                     .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION),
@@ -494,6 +527,144 @@ private fun EndedTranscript(container: AppContainer, slug: String, modifier: Mod
             Text("no speech was captured.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
         }
     }
+}
+
+/** The live ⏺ clock: elapsed since the session's audio stream opened, ticking
+ *  while shown — the recording feature surfaced in real time. */
+@Composable
+private fun RecordingClock(startedAtEpoch: Long, modifier: Modifier = Modifier) {
+    var now by remember { mutableLongStateOf(startedAtEpoch) }
+    LaunchedEffect(startedAtEpoch) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(1000)
+        }
+    }
+    Text(
+        "⏺ ${clock((now - startedAtEpoch).toInt().coerceAtLeast(0))}",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.error,
+        modifier = modifier,
+    )
+}
+
+/** The ▶ Audio tab: the session's recording.wav — the capture loop streamed
+ *  every frame here beside the transcription — with play/pause, a seek bar,
+ *  and the file handed over as a real .wav. A crashed session is repaired on
+ *  entry: the header patch rewrites its lengths from the file's true size. */
+@Composable
+private fun AudioPane(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val file = remember(slug) { container.sessions.recordingFile(slug) }
+    // repair first (~8 bytes, idempotent), then anything may open the file
+    LaunchedEffect(slug) { if (file.isFile) withContext(Dispatchers.IO) { RecordingWriter.patchHeader(file) } }
+
+    var player by remember { mutableStateOf<android.media.MediaPlayer?>(null) }
+    var totalMs by remember { mutableIntStateOf(0) }
+    var posMs by remember { mutableIntStateOf(0) }
+    var dragging by remember { mutableStateOf(false) }
+    val playing = player?.isPlaying == true
+
+    DisposableEffect(slug) {
+        onDispose {
+            val p = player
+            player = null
+            try { p?.stop() } catch (e: Exception) {}
+            p?.release()
+        }
+    }
+    // position poller at 3 Hz — as smooth as a seek bar needs; paused while
+    // the user drags so the slider never fights their thumb
+    LaunchedEffect(player != null) {
+        while (player != null) {
+            if (!dragging) player?.let { posMs = it.currentPosition }
+            delay(300)
+        }
+    }
+
+    if (!file.isFile) {
+        Column(modifier) {
+            Text("no audio recorded for this session", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "no file was written — this session predates audio recording, or its writer never opened.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        return
+    }
+
+    Column(modifier) {
+        Text(
+            "16 kHz mono — ${"%.1f".format(file.length() / 1e6)} MB",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            TextButton(onClick = {
+                val p = player
+                if (p != null) {
+                    // already prepared: pause ⇄ start reuses the same player
+                    if (p.isPlaying) p.pause() else p.start()
+                } else {
+                    scope.launch {
+                        val mp = android.media.MediaPlayer()
+                        try {
+                            withContext(Dispatchers.IO) {
+                                RecordingWriter.patchHeader(file)
+                                mp.setDataSource(file.path)
+                                mp.prepare()
+                            }
+                            mp.setOnCompletionListener { ended ->
+                                player = null
+                                posMs = 0
+                                ended.release()
+                            }
+                            totalMs = mp.duration
+                            posMs = 0
+                            mp.start()
+                            player = mp
+                        } catch (e: Exception) {
+                            try { mp.release() } catch (e: Exception) {}
+                            CaptureBus.errors.tryEmit("Audio playback failed: ${e.message}")
+                        }
+                    }
+                }
+            }) { Text(if (playing) "⏸ Pause" else "▶ Play") }
+            Text(
+                "${clock(posMs)} / ${if (totalMs > 0) clock(totalMs) else "–:––"}",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (totalMs > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 10.dp),
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { exportAsFile(context, container, slug, "recording") }) { Text("⤓ Share") }
+        }
+        if (totalMs > 0) {
+            Slider(
+                value = (posMs.toFloat() / totalMs).coerceIn(0f, 1f),
+                onValueChange = { frac ->
+                    dragging = true
+                    posMs = (frac.coerceIn(0f, 1f) * totalMs).toInt()
+                },
+                onValueChangeFinished = {
+                    dragging = false
+                    player?.seekTo(posMs)
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+/** m:ss (h:mm:ss past the hour) — one clock for the live ⏺ chip and the
+ *  Audio tab alike. */
+private fun clock(ms: Int): String {
+    val s = ms / 1000
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, (s / 60) % 60, s % 60)
+    else "%d:%02d".format(s / 60, s % 60)
 }
 
 /** The ✨ tab: one-tap comprehensive re-analysis of the full transcript,
@@ -657,7 +828,57 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             modifier = Modifier.padding(top = 10.dp),
         ) { Text("⚡ Test connection") }
 
-        Text("Transcription (on-device whisper)", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
+        Text("Speech-to-text engine", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
+        // the realtime ladder, as a switch: cloud STT answers each utterance
+        // in ~1 s (whisper on a phone can't); whisper stays loaded either way
+        // and takes every utterance the cloud misses — never the reverse
+        var sttOn by remember { mutableStateOf(settings.cloudSttEnabled) }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+            ElevatedButton(
+                onClick = { sttOn = true; settings.cloudSttEnabled = true },
+                enabled = !sttOn,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+            ) { Text("☁ cloud — realtime", style = MaterialTheme.typography.labelMedium) }
+            ElevatedButton(
+                onClick = { sttOn = false; settings.cloudSttEnabled = false },
+                enabled = sttOn,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+            ) { Text("🔒 on-device whisper", style = MaterialTheme.typography.labelMedium) }
+        }
+        Text(
+            if (sttOn) "each utterance uploads to <base URL>/audio/transcriptions under the note-taking AI's key; on-device whisper takes over on any upload miss (no network, no key, wrong host)."
+            else "fully offline — no audio leaves the device.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        if (sttOn && api != "openai") {
+            Text(
+                "the note-taking AI is set to a non-OpenAI host, which has no /audio/transcriptions endpoint — utterances will fall back to whisper.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        if (sttOn && !settings.hasApiKey) {
+            Text(
+                "⚠ no API key stored yet — set it under the note-taking AI above, or whisper transcribes everything.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+        if (sttOn) {
+            var sttModel by remember { mutableStateOf(settings.cloudSttModel) }
+            OutlinedTextField(
+                value = sttModel,
+                onValueChange = { m -> if (m.length <= 64) { sttModel = m; settings.cloudSttModel = m.trim() } },
+                label = { Text("STT model (whisper-1, gpt-4o-transcribe…)") },
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                singleLine = true,
+            )
+        }
+        Text("Fallback: on-device whisper", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
         val currentModel = settings.whisperModelPath.substringAfterLast('/')
         when (engine.state) {
             WhisperEngine.LoadState.DOWNLOADING -> Text("⤓ downloading… ${engine.progress}%", modifier = Modifier.padding(top = 6.dp))
