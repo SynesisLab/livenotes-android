@@ -86,7 +86,7 @@ class CaptureService : Service() {
             transcribePool.execute {
                 val text = app.container.whisper.transcribe(samples)
                 if (text.isNotEmpty()) {
-                    sessions.appendLine(slug, text)
+                    sessions.appendLine(slug, text, spokenAt)
                     CaptureBus.transcript.tryEmit(sessions.transcriptLines(slug))
                     synchronized(newMaterial) { newMaterial.append('\n').append(text) }
                 }

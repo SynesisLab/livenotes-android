@@ -96,11 +96,13 @@ class SessionStore(context: Context) {
         File(sessionsDir, slug).deleteRecursively()
     }
 
-    fun appendLine(slug: String, line: String) {
+    fun appendLine(slug: String, text: String, spokenAtMs: Long) {
         val f = File(sessionsDir, "$slug/transcript.md")
-        val stamped = "- [${time.format(Date())}] $line"
+        // the stamp is WHEN THE WORDS WERE SPOKEN (VAD side) — the same
+        // contract as the desktop; transcription lag never shifts lines
+        val stamped = "- [${time.format(Date(spokenAtMs))}] $text"
         f.appendText(stamped + "\n")
-        File(sessionsDir, "$slug/latest.txt").appendText(line + "\n")
+        File(sessionsDir, "$slug/latest.txt").appendText(text + "\n")
         touch(slug)
     }
 

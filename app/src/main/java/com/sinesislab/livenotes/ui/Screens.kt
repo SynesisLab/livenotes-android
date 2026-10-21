@@ -205,7 +205,10 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                 Spacer(Modifier.weight(1f))
             }
             if (notesEnabled) {
-                LiveTranscriptPane(Modifier.fillMaxWidth().padding(top = 10.dp))
+                // weight-constrained panes: an unbounded LazyColumn child grows
+                // with content until the column clips it — the "transcript
+                // disappears" bug when notes are on
+                LiveTranscriptPane(Modifier.weight(1.1f).fillMaxWidth().padding(top = 10.dp))
                 Column(Modifier.weight(1f).fillMaxWidth().padding(top = 10.dp)) {
                     Row {
                         Text("LIVE NOTES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
@@ -490,22 +493,61 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
         ) { Text("⚡ Test connection") }
 
         Text("Transcription (on-device whisper)", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 24.dp))
+        val currentModel = settings.whisperModelPath.substringAfterLast('/')
         when (engine.state) {
-            WhisperEngine.LoadState.READY -> Text("✓ model loaded — recording works offline.", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
             WhisperEngine.LoadState.DOWNLOADING -> Text("⤓ downloading… ${engine.progress}%", modifier = Modifier.padding(top = 6.dp))
-            else -> {
-                Text("No model yet — download the recommended starter (≈ 57 MB, one time):", modifier = Modifier.padding(top = 6.dp))
+            WhisperEngine.LoadState.READY -> Text("✓ model loaded — recording works offline.", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 6.dp))
+            WhisperEngine.LoadState.LOADING -> Text("loading whisper…", modifier = Modifier.padding(top = 6.dp))
+            WhisperEngine.LoadState.ERROR -> Text("⚠ ${engine.detail ?: "whisper needs attention"}", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 6.dp))
+            WhisperEngine.LoadState.IDLE -> Text("model idle", modifier = Modifier.padding(top = 6.dp))
+        }
+        // quality ladder — the big multilingual model listed FIRST (mishears
+        // of vocabulary were the base model's doing; the phone has the RAM)
+        val hf = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+        listOf(
+            "ggml-large-v3-turbo-q5_0.bin" to "Best — multilingual (547 MB)",
+            "ggml-base-q5_1.bin" to "Starter — multilingual (57 MB)",
+            "ggml-small.en.bin" to "Middle — English only (465 MB)",
+            "ggml-base.en-q5_1.bin" to "Starter — English only (57 MB)",
+        ).forEach { (fileName, label) ->
+            val active = currentModel == fileName
+            ElevatedButton(
+                onClick = {
+                    message = null
+                    container.whisper.downloadModel(fileName, hf + fileName) { _, err ->
+                        message = err ?: "✓ $fileName ready — next recording uses it"
+                    }
+                },
+                enabled = engine.state != WhisperEngine.LoadState.DOWNLOADING && !active,
+                modifier = Modifier.padding(top = 6.dp),
+            ) { Text(if (active) "🔒 $label — active" else "⤓ $label", style = MaterialTheme.typography.labelMedium) }
+        }
+
+        Text("Language", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+            listOf(
+                "auto" to "Auto",
+                "en" to "English",
+                "zh" to "中文",
+                "ja" to "日本語",
+                "es" to "Español",
+            ).forEach { (code, label) ->
+                val active = settings.whisperLanguage == code
                 ElevatedButton(
-                    onClick = {
-                        container.whisper.downloadModel(
-                            "ggml-base.en-q5_1.bin",
-                            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
-                        ) { _, err -> message = err ?: "✓ model ready" }
-                    },
-                    modifier = Modifier.padding(top = 8.dp),
-                ) { Text("⤓ Download ggml-base.en-q5_1.bin") }
+                    onClick = { settings.whisperLanguage = code },
+                    enabled = !active,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) { Text(if (active) "🔒 $label" else label, style = MaterialTheme.typography.labelMedium) }
             }
         }
+        // any other of whisper's ~90 language codes
+        OutlinedTextField(
+            value = settings.whisperLanguage.takeUnless { it in listOf("", "auto", "en", "zh", "ja", "es") } ?: "",
+            onValueChange = { code -> if (code.length <= 6) settings.whisperLanguage = code.trim() },
+            label = { Text("Other language code (e.g. fr, de, ko…)") },
+            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+            singleLine = true,
+        )
         message?.let { Text(it, modifier = Modifier.padding(top = 12.dp)) }
     }
 }
