@@ -71,7 +71,8 @@ Java_com_sinesislab_livenotes_stt_WhisperJni_fullTranscribe(
         env->ReleaseStringUTFChars(jLanguage, lang);
     params.language = language.c_str();
 
-    const int rc = whisper_full(g_ctx, &params, samples, n);
+    // current whisper.cpp takes the params struct BY VALUE
+    const int rc = whisper_full(g_ctx, params, samples, n);
     env->ReleaseFloatArrayElements(jSamples, samples, JNI_ABORT);
     if (rc != 0)
     {

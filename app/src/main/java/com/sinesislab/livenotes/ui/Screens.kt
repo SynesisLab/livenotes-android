@@ -39,7 +39,7 @@ import com.sinesislab.livenotes.capture.AutoNotesState
 import com.sinesislab.livenotes.capture.CaptureBus
 import com.sinesislab.livenotes.capture.CaptureService
 import com.sinesislab.livenotes.stt.WhisperEngine
-import com.sinesislab.livenotes.store.Meta
+import com.sinesislab.livenotes.store.SessionStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

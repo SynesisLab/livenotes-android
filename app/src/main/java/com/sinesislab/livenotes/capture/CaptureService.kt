@@ -148,10 +148,14 @@ class CaptureService : Service() {
         notesInFlight = true
         try {
             val acc = StringBuilder()
+            val cloud = app.container.settings.cloud
             CloudAi.chatStream(
-                model = app.container.settings.cloud.model,
+                model = cloud.model,
                 systemPrompt = Prompts.autoNotesSystem(existing),
                 userPrompt = Prompts.autoNotesUser(existing, material.takeLast(MAX_NEW_MATERIAL)),
+                api = cloud.api,
+                baseUrl = cloud.baseUrl,
+                apiKey = app.container.settings.apiKey,
                 onToken = { tok ->
                     acc.append(tok)
                     // stream into the panel like the desktop's 300 ms throttle,
@@ -190,10 +194,14 @@ class CaptureService : Service() {
                 val material = synchronized(newMaterial) { newMaterial.toString() }
                 try {
                     val acc = StringBuilder()
+                    val cloud = app.container.settings.cloud
                     CloudAi.chatStreamBlocking(
-                        model = app.container.settings.cloud.model,
+                        model = cloud.model,
                         systemPrompt = Prompts.autoNotesSystem(existing),
                         userPrompt = Prompts.autoNotesUser(existing, material.takeLast(MAX_NEW_MATERIAL)),
+                        api = cloud.api,
+                        baseUrl = cloud.baseUrl,
+                        apiKey = app.container.settings.apiKey,
                         onToken = {},
                     ).let { delta ->
                         if (delta.trim().isNotEmpty()) sessions.saveAutonotes(slug, buildNotes(existing, delta))

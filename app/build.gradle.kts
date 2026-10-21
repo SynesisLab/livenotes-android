@@ -10,6 +10,8 @@ plugins {
 android {
     namespace = "com.sinesislab.livenotes"
     compileSdk = 35
+    // installed locally (Android Studio's SDK dir) — matches the default's range
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "com.sinesislab.livenotes"
