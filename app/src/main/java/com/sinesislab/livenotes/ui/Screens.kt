@@ -2,6 +2,7 @@ package com.sinesislab.livenotes.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -39,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.sinesislab.livenotes.AppContainer
 import com.sinesislab.livenotes.ai.CloudAi
+import com.sinesislab.livenotes.ai.Prompts
 import com.sinesislab.livenotes.capture.AutoNotesState
 import com.sinesislab.livenotes.capture.CaptureBus
 import com.sinesislab.livenotes.capture.CaptureService
@@ -191,35 +194,214 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
         }
 
         if (mode == "recording") {
-            LazyColumn(Modifier.weight(1.1f).fillMaxWidth().padding(top = 12.dp).height(160.dp)) {
-                items(lines) { l -> Text("${l.t}  ${l.text}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 2.dp)) }
+            val notesEnabled by CaptureBus.notesEnabled.collectAsState()
+            // transcript-only mode: the toggle lives here so speech never has
+            // to stop to switch the AI notes off
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp)) {
+                ElevatedButton(
+                    onClick = { CaptureBus.notesEnabled.value = !CaptureBus.notesEnabled.value },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) { Text(if (notesEnabled) "✨ live notes ON" else "📝 transcript only", style = MaterialTheme.typography.labelMedium) }
+                Spacer(Modifier.weight(1f))
             }
-            // the AI notes panel: streaming tokens first, then the settled content
-            val notesShown = notes.content
-            Column(Modifier.weight(1f).fillMaxWidth().padding(top = 10.dp)) {
-                Row {
-                    Text("LIVE NOTES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                    if (notes.busy) Text("  ● AI writing", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            if (notesEnabled) {
+                LiveTranscriptPane(Modifier.fillMaxWidth().padding(top = 10.dp))
+                Column(Modifier.weight(1f).fillMaxWidth().padding(top = 10.dp)) {
+                    Row {
+                        Text("LIVE NOTES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        if (notes.busy) Text("  ● AI writing", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                    Text(
+                        notes.content.ifBlank { "AI notes appear within ~20 s of speech…" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 4.dp).verticalScroll(rememberScrollState()),
+                    )
                 }
-                Text(
-                    notesShown.ifBlank { "AI notes appear within ~20 s of speech…" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp).verticalScroll(rememberScrollState()),
-                )
+            } else {
+                // transcript takes the whole body
+                LiveTranscriptPane(Modifier.weight(1f).fillMaxWidth().padding(top = 10.dp))
             }
             Button(
-                onClick = {
-                    CaptureService.stop(context)
-                    mode = "ended"
-                },
+                onClick = { CaptureService.stop(context); mode = "ended" },
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
             ) { Text("■ End session") }
         }
 
         if (mode == "ended") {
-            Text("Session ended — the transcript and live notes are saved on this device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 16.dp))
-            Text("(Re-analysis runs in the next milestone — the storage and prompts are ready, see README.)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Button(onClick = onBack, modifier = Modifier.padding(top = 16.dp)) { Text("← all sessions") }
+            val s = session
+            if (s != null) {
+                EndedTabs(container, s.slug, Modifier.weight(1f).fillMaxWidth().padding(top = 12.dp))
+                TextButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp)) { Text("← all sessions") }
+            }
+        }
+    }
+}
+
+/** The recording-mode transcript: fills its weight share and AUTO-SCROLLS —
+ *  the first build pinned a fixed-height list with no scrolling, so new
+ *  speech kept appending below the fold while notes streamed (verified on a
+ *  real device: transcript.md had the lines, the pane didn't). */
+@Composable
+private fun LiveTranscriptPane(modifier: Modifier = Modifier) {
+    val lines by CaptureBus.transcript.collectAsState()
+    val listState = rememberLazyListState()
+    LaunchedEffect(lines.size) {
+        // follow the tail only while the user is already reading at the bottom
+        val atBottom = (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= listState.layoutInfo.totalItemsCount - 1
+        if (lines.isNotEmpty() && atBottom) listState.animateScrollToItem(lines.size - 1)
+    }
+    ElevatedCard(modifier = modifier) {
+        if (lines.isEmpty()) {
+            Text("speech appears here…", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(14.dp))
+        } else {
+            LazyColumn(state = listState, modifier = Modifier.padding(12.dp)) {
+                items(lines) { l ->
+                    Text(
+                        "${l.t}  ${l.text}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Ended-state tabs: the full timestamped transcript, the AI's live notes,
+ *  and the ✨ comprehensive re-analysis (streamed; runs kept as files). Each
+ *  of transcript/notes exports via the system share-sheet. */
+@Composable
+private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
+    var tab by remember { mutableStateOf("transcript") }
+    Column(modifier) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(
+                "transcript" to "Transcript",
+                "notes" to "Live notes",
+                "analysis" to "✨ Analysis",
+            ).forEach { (key, label) ->
+                ElevatedButton(onClick = { tab = key }, enabled = tab != key) { Text(label, style = MaterialTheme.typography.labelMedium) }
+            }
+        }
+        when (tab) {
+            "transcript" -> {
+                EndedTranscript(container, slug, Modifier.weight(1f).padding(top = 10.dp))
+                ExportRow(container, slug, kind = "transcript")
+            }
+            "notes" -> {
+                Column(Modifier.weight(1f).padding(top = 10.dp)) {
+                    Text(container.sessions.loadAutonotes(slug).ifBlank { "(the AI has no notes yet for this session)" }, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.verticalScroll(rememberScrollState()))
+                }
+                ExportRow(container, slug, kind = "notes")
+            }
+            "analysis" -> AnalysisPane(container, slug, Modifier.weight(1f).padding(top = 10.dp))
+        }
+    }
+}
+
+/** Share-sheet export row: transcript keeps its timestamps; notes ship as-is. */
+@Composable
+private fun ExportRow(container: AppContainer, slug: String, kind: String) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Row(modifier = Modifier.padding(top = 4.dp)) {
+        TextButton(
+            onClick = {
+                val text = if (kind == "transcript") container.sessions.transcriptText(slug) else container.sessions.loadAutonotes(slug)
+                if (text.isBlank()) return@TextButton
+                val title = (container.sessions.get(slug)?.title ?: slug) +
+                    " — " + (if (kind == "transcript") "transcript" else "live notes")
+                try {
+                    context.startActivity(
+                        android.content.Intent.createChooser(
+                            android.content.Intent(android.content.Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(android.content.Intent.EXTRA_SUBJECT, title)
+                                .putExtra(android.content.Intent.EXTRA_TEXT, text),
+                            "Export $kind",
+                        ),
+                    )
+                } catch (e: Exception) {
+                    // no share target available — nothing user-visible to do
+                }
+            },
+        ) { Text("⤓ Export ($kind)") }
+    }
+}
+
+@Composable
+private fun EndedTranscript(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
+    val lines = remember(slug) { container.sessions.transcriptLines(slug) }
+    LazyColumn(modifier) {
+        items(lines) { l ->
+            Text("${l.t}  ${l.text}", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 2.dp))
+        }
+        if (lines.isEmpty()) item {
+            Text("no speech was captured.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+/** The ✨ tab: one-tap comprehensive re-analysis of the full transcript,
+ *  streamed token-by-token; runs are kept as analysis-<n>.md. */
+@Composable
+private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
+    val scope = rememberCoroutineScope()
+    var running by remember { mutableStateOf(false) }
+    var stream by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val lastRun = remember(slug) { container.sessions.loadAnalysis(slug) } // (count, latest content)
+
+    Column(modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = {
+                    running = true
+                    stream = ""
+                    error = null
+                    scope.launch {
+                        try {
+                            val transcript = container.sessions.transcriptText(slug)
+                            if (transcript.isBlank()) throw IllegalStateException("Nothing to analyze — no speech captured yet.")
+                            val settings = container.settings.cloud
+                            val acc = StringBuilder()
+                            CloudAi.chatStream(
+                                model = settings.model,
+                                systemPrompt = Prompts.analysisSystem(null),
+                                userPrompt = Prompts.analysisUser(null, transcript),
+                                api = settings.api,
+                                baseUrl = settings.baseUrl,
+                                apiKey = container.settings.apiKey,
+                                onToken = { tok -> acc.append(tok); stream = acc.toString() },
+                            )
+                            val result = acc.toString().trim()
+                            if (result.isBlank()) throw IllegalStateException("The analysis came back empty.")
+                            container.sessions.saveAnalysis(slug, result)
+                        } catch (e: Exception) {
+                            error = e.message ?: "Re-analysis failed."
+                        } finally {
+                            running = false
+                            stream = ""
+                        }
+                    }
+                },
+                enabled = !running,
+            ) { Text(if (running) "analyzing…" else if (lastRun.first > 0) "↻ Re-analyze again" else "✨ Re-analyze transcript") }
+            if (lastRun.first > 0) {
+                Text("run #${lastRun.first} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (error != null) {
+            Text("✗ $error", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        }
+        val shown = if (stream.isNotEmpty()) stream else lastRun.second
+        if (shown.isBlank() && !running) {
+            Text("Re-reading the WHOLE transcript once: key points, decisions, action items, open questions.", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+        } else {
+            LazyColumn(Modifier.weight(1f).padding(top = 8.dp)) {
+                item {
+                    Text(shown, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
         }
     }
 }
@@ -245,6 +427,20 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onBack) { Text("← back") }
         Text("Note-taking AI (cloud)", style = MaterialTheme.typography.titleMedium)
+        // three wire flavors — pick the one your provider speaks
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(vertical = 8.dp)) {
+            listOf(
+                "openai" to "OpenAI-compatible",
+                "ollama" to "Ollama",
+                "anthropic" to "Anthropic",
+            ).forEach { (kind, label) ->
+                ElevatedButton(
+                    onClick = { api = kind },
+                    enabled = api != kind,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) { Text(label, style = MaterialTheme.typography.labelMedium) }
+            }
+        }
 
         OutlinedTextField(
             value = baseUrl,
@@ -259,6 +455,8 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             label = { Text(if (settings.hasApiKey) "API key — stored (type to replace)" else "API key") },
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             singleLine = true,
+            // the key must never read back off the screen (or a screenshot)
+            visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
         )
         OutlinedTextField(
             value = model,

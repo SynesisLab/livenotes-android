@@ -66,8 +66,10 @@ object CloudAi {
         val host = try { java.net.URI(base).host ?: base } catch (e: Exception) { base }
         if (model.isBlank()) throw IllegalStateException("No model selected — set one in settings.")
         val body: JSONObject
+        var url: String
         when (api) {
             "anthropic" -> {
+                url = "$base/messages"
                 body = JSONObject()
                     .put("model", model)
                     .putOpt("system", systemPrompt.ifBlank { null })
@@ -79,7 +81,26 @@ object CloudAi {
                     .put("stream", true)
                 temperature?.let { body.put("temperature", it) }
             }
+            "ollama" -> {
+                // Ollama's native shape, local and CLOUD alike (ollama.com/api):
+                // an OLLAMA_URL-style base (no /api suffix) gets /api/chat added,
+                // exactly like the desktop's ollama.js. Responses are NDJSON.
+                url = if (base.endsWith("/api")) "$base/chat" else "$base/api/chat"
+                body = JSONObject()
+                    .put("model", model)
+                    .put(
+                        "messages",
+                        JSONArray()
+                            .put(JSONObject().put("role", "system").put("content", systemPrompt))
+                            .put(JSONObject().put("role", "user").put("content", userPrompt)),
+                    )
+                    .put("stream", true)
+                val opts = JSONObject()
+                temperature?.let { opts.put("temperature", it) }
+                if (opts.length() > 0) body.put("options", opts)
+            }
             else -> {
+                url = "$base/chat/completions"
                 body = JSONObject()
                     .put("model", model)
                     .put(
@@ -94,7 +115,7 @@ object CloudAi {
             }
         }
         val req = Request.Builder()
-            .url(if (api == "anthropic") "$base/messages" else "$base/chat/completions")
+            .url(url)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .apply {
                 header("Content-Type", "application/json")
@@ -114,6 +135,18 @@ object CloudAi {
             reader.forEachLine forEach@{ raw ->
                 val line = raw.trim()
                 if (line.isEmpty() || line.startsWith(":")) return@forEach // keep-alive comments
+                if (api == "ollama") {
+                    // Ollama streams ONE JSON OBJECT PER LINE, no "data:" prefix
+                    if (!line.startsWith("{")) return@forEach
+                    val evt = try { JSONObject(line) } catch (e: Exception) { return@forEach }
+                    if (evt.has("error")) throw java.io.IOException("Ollama streamed an error: ${evt.optString("error").take(300)}")
+                    val piece = evt.optJSONObject("message")?.optString("content") ?: ""
+                    if (piece.isNotEmpty()) {
+                        full.append(piece)
+                        onToken(piece)
+                    }
+                    return@forEach
+                }
                 if (!line.startsWith("data:")) return@forEach
                 val data = line.removePrefix("data:").trim()
                 if (data == "[DONE]") { return@forEach }

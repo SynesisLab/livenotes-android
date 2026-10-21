@@ -134,6 +134,7 @@ class CaptureService : Service() {
 
     private suspend fun tick(force: Boolean) {
         if (notesInFlight) return
+        if (!CaptureBus.notesEnabled.value) return // transcript-only mode: no AI work at all
         synchronized(newMaterial) {
             if (!force && newMaterial.length < MIN_NEW_CHARS) return
             if (newMaterial.isEmpty()) return
@@ -188,6 +189,8 @@ class CaptureService : Service() {
         // transcribe pool, because coroutines die with this scope.
         try {
             transcribePool.submit {
+                // teardown note-compile honors the transcript-only toggle too
+                if (!CaptureBus.notesEnabled.value) return@submit
                 synchronized(newMaterial) { if (newMaterial.isEmpty()) return@submit }
                 val sessions = app.container.sessions
                 val existing = sessions.loadAutonotes(slug)
