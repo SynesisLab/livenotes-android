@@ -34,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -248,10 +249,20 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
 private fun LiveTranscriptPane(modifier: Modifier = Modifier) {
     val lines by CaptureBus.transcript.collectAsState()
     val listState = rememberLazyListState()
+    // desktop-style follow-the-tail: ON while streaming, released when the
+    // user scrolls up, re-armed when they read their way back to the bottom.
+    // A from-scratch "am I at the bottom?" check would stop permanently the
+    // moment content first overflows (the list sits at the top until this
+    // state says otherwise).
+    var follow by remember { mutableStateOf(true) }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.layoutInfo }.collect { info ->
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            follow = info.totalItemsCount <= 1 || last >= info.totalItemsCount - 1
+        }
+    }
     LaunchedEffect(lines.size) {
-        // follow the tail only while the user is already reading at the bottom
-        val atBottom = (listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= listState.layoutInfo.totalItemsCount - 1
-        if (lines.isNotEmpty() && atBottom) listState.animateScrollToItem(lines.size - 1)
+        if (follow && lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
     }
     ElevatedCard(modifier = modifier) {
         if (lines.isEmpty()) {
