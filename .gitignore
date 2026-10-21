@@ -9,5 +9,8 @@ captures/
 .cxx/
 *.apk
 *.aab
+app/src/main/cpp/whisper
+app/src/main/cpp/whisper/
 app/src/main/cpp/whisper/.kotlin/
 kotlinc/
+.kotlin/
