@@ -108,8 +108,12 @@ class SessionStore(context: Context) {
 
     fun transcriptLines(slug: String): List<TsLine> =
         try {
-            Regex("^- \\[(\\d{2}:\\d{2})\\] (.*)$").findAll(File(sessionsDir, "$slug/transcript.md").readText()).map {
-                TsLine(it.groupValues[1], it.groupValues[2])
+            // per-line parse (the desktop's loop, not a whole-file ^…$ match:
+            // JVM anchors match only string start/end without MULTILINE — the
+            // whole-pane-empties-on-the-second-utterance bug)
+            val pattern = Regex("^- \\[(\\d{2}:\\d{2})\\] (.*)$")
+            File(sessionsDir, "$slug/transcript.md").readText().lineSequence().mapNotNull { line ->
+                pattern.matchEntire(line.trim())?.let { TsLine(it.groupValues[1], it.groupValues[2]) }
             }.toList()
         } catch (e: Exception) {
             emptyList()
