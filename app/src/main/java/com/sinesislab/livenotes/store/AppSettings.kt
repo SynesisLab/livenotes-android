@@ -53,7 +53,17 @@ class AppSettings(context: Context) {
             }
         }
 
-    val hasApiKey: Boolean get() = !prefs.getString("cloud.key.wrapped", null).isNullOrBlank()
+    /** True only when a stored key actually DECRYPTS — a blob left unreadable
+     *  (Keystore reset after an uninstall) counts as "not stored", so the UI
+     *  never claims a key it can't use. */
+    val hasApiKey: Boolean
+        get() = try {
+            !decryptQuiet(prefs.getString("cloud.key.wrapped", null)).isNullOrBlank()
+        } catch (e: Exception) {
+            false
+        }
+
+    private fun decryptQuiet(wrapped: String?): String? = wrapped?.let { KeystoreCrypto.decrypt(it) }
 
     /** whisper.cpp model to load; downloaded into filesDir, so stored by path. */
     var whisperModelPath: String
@@ -69,8 +79,8 @@ class AppSettings(context: Context) {
 object KeystoreCrypto {
     private const val KEYSTORE = "AndroidKeyStore"
     private const val ALIAS = "livenotes-api-key"
-    private const val IV_BITS = 128
     private const val TAG_BITS = 128
+    private const val IV_BYTES = 12 // GCM's standard 96-bit IV — Android Keystore refuses anything else
 
     private fun masterKey(): SecretKey {
         val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
@@ -97,11 +107,14 @@ object KeystoreCrypto {
     fun decrypt(wrapped: String): String? =
         try {
             val data = Base64.decode(wrapped, Base64.NO_WRAP)
-            val spec = GCMParameterSpec(TAG_BITS, data, 0, IV_BITS / 8)
+            val spec = GCMParameterSpec(TAG_BITS, data, 0, IV_BYTES)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, masterKey(), spec)
-            String(cipher.doFinal(data, IV_BITS / 8, data.size - IV_BITS / 8), Charsets.UTF_8)
+            String(cipher.doFinal(data, IV_BYTES, data.size - IV_BYTES), Charsets.UTF_8)
         } catch (e: Exception) {
+            // visible in logcat (tag: keystore-fail): a blob that can't open is
+            // indistinguishable from "no key stored" unless someone looks
+            android.util.Log.e("keystore-fail", "decrypt failed: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
 }

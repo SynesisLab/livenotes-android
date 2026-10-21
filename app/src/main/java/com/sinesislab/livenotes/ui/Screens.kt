@@ -1,13 +1,17 @@
 package com.sinesislab.livenotes.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -78,15 +82,20 @@ sealed interface Screen {
 @Composable
 fun RootScaffold(container: AppContainer) {
     var screen by remember { mutableStateOf<Screen>(Screen.List) }
-    when (val s = screen) {
-        is Screen.List -> ListScreen(
-            container,
-            onNew = { screen = Screen.Session("") },
-            onOpen = { slug -> screen = Screen.Session(slug) },
-            onSettings = { screen = Screen.Settings },
-        )
-        is Screen.Session -> SessionScreen(container, slug = s.slug, onBack = { screen = Screen.List })
-        is Screen.Settings -> SettingsScreen(container, onBack = { screen = Screen.List })
+    // edge-to-edge is on, so every screen keeps clear of the system bars —
+    // without this the header buttons sit under the status bar (the emulator
+    // proved it: taps at the settings label land in the status-bar zone)
+    Box(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+        when (val s = screen) {
+            is Screen.List -> ListScreen(
+                container,
+                onNew = { screen = Screen.Session("") },
+                onOpen = { slug -> screen = Screen.Session(slug) },
+                onSettings = { screen = Screen.Settings },
+            )
+            is Screen.Session -> SessionScreen(container, slug = s.slug, onBack = { screen = Screen.List })
+            is Screen.Settings -> SettingsScreen(container, onBack = { screen = Screen.List })
+        }
     }
 }
 
@@ -220,6 +229,10 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
 @Composable
 private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     val settings = container.settings
+    // re-load the persisted model on entry — the engine state resets to IDLE
+    // on every app launch, and only the capture service normally loads it;
+    // without this the screen would claim "No model yet" after it exists
+    LaunchedEffect(Unit) { container.whisper.ensureLoaded() }
     var api by remember { mutableStateOf(settings.cloud.api) }
     var baseUrl by remember { mutableStateOf(settings.cloud.baseUrl) }
     var model by remember { mutableStateOf(settings.cloud.model) }

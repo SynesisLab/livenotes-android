@@ -12,6 +12,7 @@
     <application
         android:name=".NotesApp"
         android:label="Live Notes"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher_round"
         android:allowBackup="false"
         android:theme="@style/Theme.LiveNotes"
