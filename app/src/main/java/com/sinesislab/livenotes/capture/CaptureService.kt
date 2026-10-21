@@ -95,7 +95,15 @@ class CaptureService : Service() {
         lines.addAll(app.container.sessions.transcriptLines(slug))
         val vad = Vad { samples, spokenAt ->
             transcribePool.execute {
+                val t0 = System.currentTimeMillis()
                 val text = app.container.whisper.transcribe(samples)
+                // instrument the live path: if speech stops becoming text, the
+                // log answers WHERE — no utterance at all, empty inference, or
+                // a slow one
+                android.util.Log.d(
+                    "livenotes",
+                    "utterance ${"%.1f".format(samples.size / 16_000f)}s spoken@${spokenAt} inf=${System.currentTimeMillis() - t0}ms -> ${if (text.isEmpty()) "(empty)" else text.take(60)}",
+                )
                 if (text.isNotEmpty()) {
                     val line = app.container.sessions.appendLine(slug, text, spokenAt)
                     synchronized(lines) { lines.add(line) }

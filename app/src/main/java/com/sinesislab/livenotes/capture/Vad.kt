@@ -18,6 +18,7 @@ class Vad(private val onUtterance: (samples: FloatArray, spokenAtEpochMs: Long) 
     }
 
     private var speaking = false
+    private var frameCount = 0L
     private var noiseFloor = 0.003
     private var frames = ArrayList<FloatArray>()
     private val preRoll = ArrayList<FloatArray>()
@@ -33,6 +34,10 @@ class Vad(private val onUtterance: (samples: FloatArray, spokenAtEpochMs: Long) 
         var sum = 0.0
         for (v in chunk) sum += v.toDouble() * v
         val r = kotlin.math.sqrt(sum / chunk.size)
+        // instrumented: silence-vs-speech is the first suspect when text
+        // never appears; ~1 log per second, plus a line on speech start/stop
+        frameCount++
+        if (frameCount % 12L == 1L) android.util.Log.d("livenotes", "vad rms=$r floor=$noiseFloor speaking=$speaking")
         if (!speaking) noiseFloor = (noiseFloor * 0.95 + r * 0.05).coerceIn(0.0005, 0.02)
         val onThreshold = maxOf(noiseFloor * 3.5, 0.005)
         val offThreshold = onThreshold * 0.6
