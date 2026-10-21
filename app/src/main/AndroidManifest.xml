@@ -35,5 +35,16 @@
             android:name=".capture.CaptureService"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <!-- exports share as real files (transcript .txt, notes/analysis .md) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

@@ -96,14 +96,17 @@ class SessionStore(context: Context) {
         File(sessionsDir, slug).deleteRecursively()
     }
 
-    fun appendLine(slug: String, text: String, spokenAtMs: Long) {
+    fun appendLine(slug: String, text: String, spokenAtMs: Long): TsLine {
         val f = File(sessionsDir, "$slug/transcript.md")
         // the stamp is WHEN THE WORDS WERE SPOKEN (VAD side) — the same
-        // contract as the desktop; transcription lag never shifts lines
-        val stamped = "- [${time.format(Date(spokenAtMs))}] $text"
-        f.appendText(stamped + "\n")
+        // contract as the desktop; transcription lag never shifts lines.
+        // Returns the stamped line so callers can keep the live list without
+        // re-parsing the file.
+        val line = TsLine(time.format(Date(spokenAtMs)), text)
+        f.appendText("- [${line.t}] ${line.text}\n")
         File(sessionsDir, "$slug/latest.txt").appendText(text + "\n")
         touch(slug)
+        return line
     }
 
     fun transcriptLines(slug: String): List<TsLine> =

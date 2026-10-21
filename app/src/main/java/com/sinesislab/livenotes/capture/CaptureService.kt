@@ -19,6 +19,7 @@ import com.sinesislab.livenotes.NotesApp
 import com.sinesislab.livenotes.R
 import com.sinesislab.livenotes.ai.CloudAi
 import com.sinesislab.livenotes.ai.Prompts
+import com.sinesislab.livenotes.store.TsLine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -45,6 +46,7 @@ class CaptureService : Service() {
     private var slug = ""
     private var notesJob: Job? = null
     private val newMaterial = StringBuilder()
+    @Volatile private var newLinesCount = 0
     @Volatile private var notesInFlight = false
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -79,16 +81,29 @@ class CaptureService : Service() {
     /// Capture loop: whisper runs on the transcribe pool, so the read loop
     /// never waits behind a long transcription (multiple utterances queue up
     /// and are fed to the engine one at a time, in order).
+    /// The transcript is the LIVE path: each finished utterance appends to an
+    /// in-memory list and emits immediately — no full-file re-read per line.
+    /// The AI notes are the DECOUPLED path: the ticker only acts once a
+    /// couple of lines have piled up, so the model's slowness can never hold
+    /// back speech-to-text.
+    private val lines = mutableListOf<TsLine>()
+
     private fun startCapture() {
         if (running) return
-        val sessions = app.container.sessions
+        // a STICKY restart re-seeds the live list from the stored transcript
+        lines.clear()
+        lines.addAll(app.container.sessions.transcriptLines(slug))
         val vad = Vad { samples, spokenAt ->
             transcribePool.execute {
                 val text = app.container.whisper.transcribe(samples)
                 if (text.isNotEmpty()) {
-                    sessions.appendLine(slug, text, spokenAt)
-                    CaptureBus.transcript.tryEmit(sessions.transcriptLines(slug))
-                    synchronized(newMaterial) { newMaterial.append('\n').append(text) }
+                    val line = app.container.sessions.appendLine(slug, text, spokenAt)
+                    synchronized(lines) { lines.add(line) }
+                    CaptureBus.transcript.tryEmit(synchronized(lines) { lines.toList() })
+                    synchronized(newMaterial) {
+                        newMaterial.append('\n').append(text)
+                        newLinesCount++
+                    }
                 }
             }
         }
@@ -136,8 +151,13 @@ class CaptureService : Service() {
         if (notesInFlight) return
         if (!CaptureBus.notesEnabled.value) return // transcript-only mode: no AI work at all
         synchronized(newMaterial) {
-            if (!force && newMaterial.length < MIN_NEW_CHARS) return
             if (newMaterial.isEmpty()) return
+            if (!force) {
+                // DECOUPLED from the transcript on purpose: the AI compile
+                // starts only once a COUPLE OF LINES have piled up — the
+                // model's catch-up time never blocks speech→text
+                if (newLinesCount < 2 && newMaterial.length < 600) return
+            }
         }
         val sessions = app.container.sessions
         val existing = sessions.loadAutonotes(slug)
@@ -254,7 +274,8 @@ class CaptureService : Service() {
         private const val ENCODING = AudioFormat.ENCODING_PCM_16BIT
         private const val FRAME_SAMPLES = RATE * 80 / 1000 // 1280 — 80 ms frames
         private const val TICK_MS = 20000L
-        private const val MIN_NEW_CHARS = 250
+        // the AI-compile gate lives in tick(): once a couple of lines pile up
+        // (≥2 new lines or ≥600 chars) — never transcript-blocking
         private const val MAX_NEW_MATERIAL = 6000
         const val EXTRA_SLUG = "slug"
 

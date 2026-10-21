@@ -39,6 +39,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.sinesislab.livenotes.AppContainer
 import com.sinesislab.livenotes.ai.CloudAi
@@ -51,6 +57,7 @@ import com.sinesislab.livenotes.store.SessionStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Minimal screens: list → session (record → live transcript + AI notes →
@@ -215,11 +222,8 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                         Text("LIVE NOTES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         if (notes.busy) Text("  ● AI writing", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
-                    Text(
-                        notes.content.ifBlank { "AI notes appear within ~20 s of speech…" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 4.dp).verticalScroll(rememberScrollState()),
-                    )
+                    // the AI notes are markdown — render them as markdown
+                    MarkdownBlock(notes.content.ifBlank { "*AI notes appear within ~20 s of speech…*" }, Modifier.weight(1f).padding(top = 4.dp))
                 }
             } else {
                 // transcript takes the whole body
@@ -303,9 +307,8 @@ private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier 
                 ExportRow(container, slug, kind = "transcript")
             }
             "notes" -> {
-                Column(Modifier.weight(1f).padding(top = 10.dp)) {
-                    Text(container.sessions.loadAutonotes(slug).ifBlank { "(the AI has no notes yet for this session)" }, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.verticalScroll(rememberScrollState()))
-                }
+                // the AI bullets are markdown
+                MarkdownBlock(container.sessions.loadAutonotes(slug).ifBlank { "*(the AI has no notes yet for this session)*" }, Modifier.weight(1f).padding(top = 10.dp))
                 ExportRow(container, slug, kind = "notes")
             }
             "analysis" -> AnalysisPane(container, slug, Modifier.weight(1f).padding(top = 10.dp))
@@ -313,34 +316,111 @@ private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier 
     }
 }
 
-/** Share-sheet export row: transcript keeps its timestamps; notes ship as-is. */
+/** Share-sheet export button → hands the receiver an actual file. */
 @Composable
 private fun ExportRow(container: AppContainer, slug: String, kind: String) {
     val context = androidx.compose.ui.platform.LocalContext.current
     Row(modifier = Modifier.padding(top = 4.dp)) {
         TextButton(
-            onClick = {
-                val text = if (kind == "transcript") container.sessions.transcriptText(slug) else container.sessions.loadAutonotes(slug)
-                if (text.isBlank()) return@TextButton
-                val title = (container.sessions.get(slug)?.title ?: slug) +
-                    " — " + (if (kind == "transcript") "transcript" else "live notes")
-                try {
-                    context.startActivity(
-                        android.content.Intent.createChooser(
-                            android.content.Intent(android.content.Intent.ACTION_SEND)
-                                .setType("text/plain")
-                                .putExtra(android.content.Intent.EXTRA_SUBJECT, title)
-                                .putExtra(android.content.Intent.EXTRA_TEXT, text),
-                            "Export $kind",
-                        ),
-                    )
-                } catch (e: Exception) {
-                    // no share target available — nothing user-visible to do
-                }
-            },
+            onClick = { exportAsFile(context, container, slug, kind) },
         ) { Text("⤓ Export ($kind)") }
     }
 }
+
+/** Markdown in pure Compose — no markdown dependency: the AI surfaces emit a
+ *  well-known subset (##/### headings, bullet lists, checklists, **bold**,
+ *  *italic*, `code`) matching the desktop's prompt contract, so a tiny
+ *  renderer covers it all. */
+private val INLINE_MD = Regex("\\*\\*(.+?)\\*\\*|\\*(.+?)\\*|`(.+?)`")
+
+private fun String.mdInline(): AnnotatedString = buildAnnotatedString {
+    var i = 0
+    for (m in INLINE_MD.findAll(this@mdInline)) {
+        if (m.range.first > i) append(this@mdInline.substring(i, m.range.first))
+        val marker = this@mdInline[m.range.first]
+        pushStyle(
+            when {
+                marker == '`' -> SpanStyle(fontFamily = FontFamily.Monospace)
+                this@mdInline[m.range.first + 1] == '*' -> SpanStyle(fontWeight = FontWeight.Bold)
+                else -> SpanStyle(fontStyle = FontStyle.Italic)
+            }
+        )
+        append(m.value.trimStart('*', '`', ' ').trimEnd('*', '`', ' '))
+        pop()
+        i = m.range.last + 1
+    }
+    if (i < this@mdInline.length) append(this@mdInline.substring(i))
+}
+
+@Composable
+private fun MarkdownBlock(text: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        for (raw in text.lineSequence()) {
+            val ln = raw.trimEnd()
+            when {
+                ln.isBlank() -> Spacer(Modifier.height(4.dp))
+                ln.startsWith("### ") -> Text(ln.substring(4).mdInline(), style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+                ln.startsWith("## ") -> Text(ln.substring(3).mdInline(), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+                ln.startsWith("# ") -> Text(ln.substring(2).mdInline(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 6.dp))
+                Regex("^[-*]\\s+\\[[ xX]]\\s+(.*)$").matchEntire(ln) != null -> {
+                    val m = Regex("^[-*]\\s+\\[[ xX]]\\s+(.*)$").matchEntire(ln)!!
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (m.groupValues[1].isNotBlank() && m.value.contains("[xX]")) "☑ " else "☐ ")
+                        Text(m.groupValues[1].mdInline())
+                    }
+                }
+                Regex("^[-*]\\s+(.*)$").matchEntire(ln) != null -> Row {
+                    Text(Regex("^[-*]\\s+(.*)$").matchEntire(ln)!!.let { "• " })
+                    Text(Regex("^[-*]\\s+(.*)$").matchEntire(ln)!!.groupValues[1].mdInline())
+                }
+                Regex("^\\d+\\.\\s+(.*)$").matchEntire(ln) != null -> Column { Text(ln.mdInline()) }
+                else -> Text(ln.mdInline(), style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+    }
+}
+
+/**
+ * Export as an actual file (a phone's share sheet with a raw text blob is
+ * useless — the ask was "a text file"): transcript → .txt (keeps the
+ * HH:MM stamps), AI notes / analysis → .md (they're markdown docs by
+ * contract). Shares the written file through FileProvider so Drive/Notes/
+ * chat apps can receive it as a document.
+ */
+private fun exportAsFile(context: android.content.Context, container: AppContainer, slug: String, kind: String) {
+    val text = when (kind) {
+        "transcript" -> container.sessions.transcriptText(slug)
+        "notes" -> container.sessions.loadAutonotes(slug)
+        else -> container.sessions.loadAnalysis(slug).second
+    }
+    if (text.isBlank()) return
+    val prettyTitle = container.sessions.get(slug)?.title ?: slug
+    val safeName = prettyTitle.lowercase().map { if (it.isLetterOrDigit() && it.code < 128) it else '-' }
+        .joinToString("").foldToSingleDash().trim('-').take(60).ifBlank { "session" }
+    val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+    val file = File(dir, "$safeName-$kind.${if (kind == "transcript") "txt" else "md"}")
+    file.writeText(text)
+    val uri = androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    try {
+        context.startActivity(
+            android.content.Intent.createChooser(
+                android.content.Intent(android.content.Intent.ACTION_SEND)
+                    .setType("text/plain")
+                    .putExtra(android.content.Intent.EXTRA_STREAM, uri)
+                    .putExtra(android.content.Intent.EXTRA_SUBJECT, "$prettyTitle — $kind")
+                    .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                "Export $kind as a file",
+            ),
+        )
+    } catch (e: Exception) {
+        // no share target — the file still exists in cacheDir/exports
+    }
+}
+
+private fun String.foldToSingleDash(): String =
+    StringBuilder().also { sb ->
+        for (c in this) if (!(c == '-' && sb.isNotEmpty() && sb.last() == '-')) sb.append(c)
+    }.toString()
 
 @Composable
 private fun EndedTranscript(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
@@ -363,7 +443,10 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
     var running by remember { mutableStateOf(false) }
     var stream by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
-    val lastRun = remember(slug) { container.sessions.loadAnalysis(slug) } // (count, latest content)
+    // a VAR state (not a frozen remember): after a run it must reflect the
+    // saved file, or the pane reverts to the pre-run snapshot — the
+    // "flashes then back to just the button" bug
+    var lastRun by remember(slug) { mutableStateOf(container.sessions.loadAnalysis(slug)) } // (count, latest content)
 
     Column(modifier) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -390,6 +473,8 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
                             val result = acc.toString().trim()
                             if (result.isBlank()) throw IllegalStateException("The analysis came back empty.")
                             container.sessions.saveAnalysis(slug, result)
+                            // refresh so the pane lands ON the new run
+                            lastRun = container.sessions.loadAnalysis(slug)
                         } catch (e: Exception) {
                             error = e.message ?: "Re-analysis failed."
                         } finally {
@@ -403,6 +488,12 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
             if (lastRun.first > 0) {
                 Text("run #${lastRun.first} saved", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            // the analysis exports as a .md file like the other surfaces
+            val context = androidx.compose.ui.platform.LocalContext.current
+            TextButton(
+                onClick = { exportAsFile(context, container, slug, "analysis") },
+                enabled = lastRun.first > 0,
+            ) { Text("⤓ Export (analysis)") }
         }
         if (error != null) {
             Text("✗ $error", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
@@ -413,7 +504,8 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
         } else {
             LazyColumn(Modifier.weight(1f).padding(top = 8.dp)) {
                 item {
-                    Text(shown, style = MaterialTheme.typography.bodyMedium)
+                    // the analysis is markdown — render it
+                    MarkdownBlock(shown)
                 }
             }
         }

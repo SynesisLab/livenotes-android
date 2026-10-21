@@ -11,7 +11,7 @@ class Vad(private val onUtterance: (samples: FloatArray, spokenAtEpochMs: Long) 
     private companion object {
         const val RATE = 16000
         const val PRE_ROLL_MS = 400
-        const val END_SILENCE_MS = 800
+        const val END_SILENCE_MS = 600 // the desktop's 800 traded latency for chop-resistance; on-device this closes utterances snappier
         const val MIN_SPEECH_MS = 400
         const val MAX_UTTERANCE_MS = 15000
         const val MIN_SAMPLES = 8000 // 0.5 s — same floor as sendPcm on desktop
