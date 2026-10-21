@@ -50,11 +50,27 @@ class WhisperEngine(context: Context) {
             _state.value = EngineState(LoadState.ERROR, detail = "No whisper model yet — settings → download one.")
             return
         }
+        loadModelFile(File(path)) { _, _ -> }
+    }
+
+    /** The one serialized load path, shared by ensureLoaded, the download and
+     *  the "switch to an already-downloaded model" path — the OLD short-circuit
+     *  returned "✓ ready" without touching the context, so tapping a preset
+     *  whose file existed never actually switched anything. */
+    private fun loadModelFile(dest: File, onDone: (File?, String?) -> Unit) {
         _state.value = EngineState(LoadState.LOADING)
-        executor.submit<Boolean> {
-            val ok = WhisperJni.init(path, cpuThreads)
-            _state.value = EngineState(if (ok) LoadState.READY else LoadState.ERROR, detail = if (ok) null else "Model failed to load")
-            ok
+        scope.launch {
+            try {
+                val ok = withContext(Dispatchers.IO) {
+                    executor.submit<Boolean> { WhisperJni.init(dest.path, cpuThreads) }.get()
+                }
+                settings.whisperModelPath = dest.path
+                _state.value = EngineState(if (ok) LoadState.READY else LoadState.ERROR, detail = if (ok) null else "Model failed to load")
+                withContext(Dispatchers.Main) { onDone(dest, if (ok) null else "Model failed to load") }
+            } catch (e: Exception) {
+                _state.value = EngineState(LoadState.ERROR, detail = e.message)
+                withContext(Dispatchers.Main) { onDone(null, e.message) }
+            }
         }
     }
 
@@ -73,11 +89,12 @@ class WhisperEngine(context: Context) {
         }
     }
 
-    /** Stream-download a model file into filesDir/models, then load it. */
+    /** Stream-download a model file into filesDir/models, then load it.
+     *  Switching to a preset already on the device just loads it (no fetch). */
     fun downloadModel(fileName: String, url: String, onDone: (File?, String?) -> Unit) {
         val dest = File(File(filesDir, "models"), fileName)
         if (dest.exists() && dest.length() > 1024 * 1024) {
-            onDone(dest, null)
+            loadModelFile(dest, onDone)
             return
         }
         _state.value = EngineState(LoadState.DOWNLOADING, progress = 0)
@@ -111,11 +128,7 @@ class WhisperEngine(context: Context) {
                 }
                 val tmp = File(dest.path + ".part")
                 if (tmp.exists() && !tmp.renameTo(dest)) throw java.io.IOException("rename failed")
-                settings.whisperModelPath = dest.path
-                _state.value = EngineState(LoadState.LOADING)
-                val ok = executor.submit<Boolean> { WhisperJni.init(dest.path, cpuThreads) }.get()
-                _state.value = EngineState(if (ok) LoadState.READY else LoadState.ERROR, detail = if (ok) null else "Model failed to load")
-                withContext(Dispatchers.Main) { onDone(dest, if (ok) null else "Model failed to load") }
+                loadModelFile(dest, onDone)
             } catch (e: Exception) {
                 _state.value = EngineState(LoadState.ERROR, detail = e.message)
                 withContext(Dispatchers.Main) { onDone(null, e.message) }
