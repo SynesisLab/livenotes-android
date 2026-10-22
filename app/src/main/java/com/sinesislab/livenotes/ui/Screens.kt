@@ -871,6 +871,7 @@ private fun AudioPane(container: AppContainer, slug: String, modifier: Modifier 
  *  by the notes-AI model field and the STT model field, so nobody has to
  *  hand-type a model name the host already knows. The key used is whatever
  *  was typed, else the stored one. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun ModelFetcher(api: String, baseUrl: String, typedKey: String, label: String, onPick: (String) -> Unit, onMessage: (String?) -> Unit) {
     val scope = rememberCoroutineScope()
