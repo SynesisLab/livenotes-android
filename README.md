@@ -1,8 +1,22 @@
 # 🎙 Live Notes — Android
 
-**The phone records, transcribes, and takes notes — independently.** On-device capture, on-device whisper.cpp, notes through a cloud AI API you configure once. No desktop, no server, no LAN juggling required for the capture loop.
+**The phone records, transcribes, and takes notes — independently.** On-device capture, on-device whisper.cpp, notes through the cloud AI you configure once — plus a live Android 16 notification with the recording's own progress bar and Pause/End controls on it.
 
-The sibling project **[transcribe-livenotes](https://github.com/SynesisLab/transcribe-livenotes)** is the desktop app (Node + whisper.cpp + Ollama/cloud); this repo is its native Android companion, promoted to the plan's mobile-of-record (PLAN.md Phase 6 there — "the Android APK should be able to independently record, transcribe and send it off to the cloud for processing and note taking").
+This is the native Android companion to **[transcribe-livenotes](https://github.com/SynesisLab/transcribe-livenotes)** — the desktop/web app (Node + whisper.cpp + Ollama/cloud) it grew out of. The phone is the client of record here: sessions mirror the desktop's on-disk layout, so a future sync pushes them into a desktop server untouched.
+
+## What it does
+
+- **Record** — every session streams its raw audio to `recording.wav` (16 kHz mono PCM) as it's captured; hour-long sessions cost flat RAM, and a crash mid-session is repaired on the next playback or share. Pause stops the audio file *and* the transcription (recorder-style compressed timeline); the ⏺ clock reads the WAV's own length every second, so it never lies.
+- **Live transcribe** — realtime-first ladder: whisper.cpp runs on-device (NEON path, model downloaded in-app); if you switch on cloud STT, utterances upload to a `/audio/transcriptions`-compatible host under the same key the notes AI uses (~1 s round trip), and any miss — offline, bad key, wrong host — falls through to whisper instantly. Traditional Chinese (`繁體中文`) anchors the output script through a conditioning prompt on both engines; per-session language beats the global default.
+- **Live AI notes** — the cloud model compiles new transcript material into growing markdown bullets every ~20 s while talk happens (decoupled: the model's slowness never blocks speech→text). A per-session toggle at the start page turns notes off for the session; still flippable mid-session.
+- **Post-recording analyze** — end a session (the wind-down: the tail utterances drain onto the transcript, one final notes pass runs, stages shown), then ✨ Re-analyze the full transcript into *Key points / Decisions / Action items / Open questions / Highlights* — analysis runs are kept (`analysis.md` + numbered archives).
+- **Session metadata** — name (display), **topic** (the AI's session context — never displayed, it steers every live-notes call and the re-analysis), language, and the live-notes toggle, all per session.
+
+Everything — transcript (spoken-at `HH:MM` stamps), notes, analyses, audio — shares via the system sheet as real files (`.txt` / `.md` / `.wav`), and session titles can be renamed after the fact.
+
+## The notification is a live notification
+
+On Android 16+ the foreground-service notification is a **ProgressStyle live notification** (`NotificationCompat.ProgressStyle` + `setRequestPromotedOngoing`, `POST_PROMOTED_NOTIFICATIONS` in the manifest): the progress bar *is* the session's audio timeline — one segment per minute, deep purple where the VAD heard speech — with the tracker riding the file's head. Pause and End sit right on it and work from the lockscreen. Below Android 16 it renders as a plain ongoing notification. `POST_NOTIFICATIONS` is prompted on first mic grant.
 
 ## Architecture
 
@@ -11,9 +25,12 @@ The sibling project **[transcribe-livenotes](https://github.com/SynesisLab/trans
                                                              800 ms end-silence — same constants
                                                              as the desktop's useRecorder.js)
                                                   │
+                recording.wav ◀── every frame ────┤  (lossless path, never gated by STT)
+                                                  │
                                                   ▼
-                                     whisper.cpp on-device (NDK/JNI,
-                                     app/src/main/cpp/whisper — per ABI)
+                                     realtime-first ladder:
+                                       cloud /audio/transcriptions (when switched on) 
+                                       → whisper.cpp on-device fallback (NDK/JNI)
                                                   │
                                      transcript "- [HH:MM] text" (spoken-at)
                                                   │
@@ -21,48 +38,45 @@ The sibling project **[transcribe-livenotes](https://github.com/SynesisLab/trans
                                                   │
                                                   ▼
                                      cloud AI (OkHttp, OpenAI-compatible or
-                                     Anthropic Messages API): live-notes
-                                     ticker (~20 s) + end-of-session
-                                     comprehensive re-analysis ✨
+                                     Anthropic Messages or Ollama): live-notes
+                                     ticker (~20 s) + end-of-session re-analysis ✨
 ```
 
-- **Foreground service** (`FOREGROUND_SERVICE_MICROPHONE`) — capture continues with the screen off. This is the native advantage the desktop PWA never had.
-- **whisper on-device** — the model (~57 MB for `ggml-base.en-q5_1`, one-time download inside the app) lives in `filesDir/models`; the engine is loaded once and shared.
-- **Timestamps stay spoken-at** — they come from the VAD chunker on this side, so the transcript has the same contract as the desktop's.
-- **Cloud AI is the notes engine** (desktop decision D6/D8) — notes stream token-by-token into a live panel; "End session → ✨ Re-analyze" re-reads the whole transcript and organizes key points / decisions / action items / open questions / highlights. Prompt texts are kept in lockstep with the desktop (`ai/Prompts.kt` ↔ `server/ai/prompts.js`).
-- **API key on the device** — the documented posture change: the desktop keeps keys server-side, but here the phone IS the client of record. The key is wrapped with an AndroidKeyStore AES/GCM key (`store/AppSettings.kt`) and never logged.
-- **Sessions** live in `filesDir/data` in the desktop's exact layout (`sessions.json` + `sessions/<slug>/transcript.md`, `autonotes.md`, `analysis*.md`, `latest.txt`) — a later sync/upload milestone can push them into a LiveNotes desktop server as-is.
+- **Foreground service** (`FOREGROUND_SERVICE_MICROPHONE`) — capture continues with the screen off; that's the native advantage a PWA never had. A session left with the screen away re-opens straight into recording mode.
+- **whisper on-device** — the model (~57 MB `ggml-base` one-time download inside the app) lives in `filesDir/models`, loaded once, shared; quality presets up to `large-v3-turbo` are one tap in settings (the realtime-first ordering favors the fast model on phones). The JNI grew a `prompt` argument (`initial_prompt` + `carry_initial_prompt`) for script anchoring.
+- **Timestamps stay spoken-at** — they come from the VAD chunker on this side, matching the desktop's contract.
+- **Cloud AI is the notes engine** (desktop decision D6/D8) — notes stream token-by-token into a live markdown panel; the same configured key powers cloud STT. One key, two uses.
+- **API key on the device** — the documented posture change from the desktop: the key is wrapped with an AndroidKeyStore AES/GCM key and never read back to the screen.
+- **Sessions** live in `filesDir/data` in the desktop's exact layout: `sessions.json` (index: slug/title/timestamps/language/topic) + per-slug `transcript.md`, `latest.txt`, `autonotes.md`, `analysis.md` (+ `analysis-N.md` runs), `recording.wav`.
 
-## Status / roadmap
+## Install a release
 
-The repo ships the **foundation**: Gradle + NDK/CMake wiring for whisper.cpp, the capture service + VAD, the JNI engine wrapper, the cloud AI client, Keystore-key storage, session storage, and a minimal Compose UI (list → record → transcript + live notes → stop → settings with model download + Test connection).
+Download the `.apk` from the [latest release](https://github.com/SynesisLab/livenotes-android/releases), then either:
 
-Next milestones (each is a PR-sized step):
+```
+adb install -r livenotes-debug.apk
+```
 
-1. **Compile + run on a device** (`git submodule add https://github.com/ggerganov/whisper.cpp app/src/main/cpp/whisper`, build in Android Studio; see below) — this session's scaffold was written without an Android toolchain: expect small compile fixes at first sync, that's what "foundation" means.
-2. **End-of-session ✨ Re-analyze UI** — the prompt family (`Prompts.analysisSystem/User`), storage (`SessionStore.saveAnalysis/loadAnalysis`, runs kept as `analysis-N.md` + latest mirrored to `analysis.md`) and the streamed cloud call are ready; this milestone is the screen + the map/merge port for transcripts beyond one context window (port `chunkTranscript`/`batchByChars` from `server/autonotes.js`).
-3. **Model picker + language setting in the recording screen** (language is already stored; the setting is).
-4. **Key-posture UX** — paste key → wrapped immediately; "remove" clears.
-5. **Desktop sync (optional)** — POST sessions to a LiveNotes server over LAN/Tailscale so phone sessions appear on the desktop dashboard; the PWA remains the zero-app fallback.
-6. Local export: share-sheet `.md` for transcript + notes + runs.
+or open it on the phone and let the installer handle it (the debug key signs these builds; for daily use, build your own as below).
 
 ## Build it
 
-1. Android Studio (Ladybug or newer) with the **NDK** and **CMake 3.22+** installed (SDK Manager).
+1. Android Studio (Ladybug or newer) with the **NDK 28.2+** and **CMake 3.22+** (SDK Manager). AGP 8.9.1 / Gradle 8.11.1 / compileSdk 36 — the wrapper handles Gradle.
 2. Vendor the engine:
    ```bash
    git clone https://github.com/SynesisLab/livenotes-android
    cd livenotes-android
-   git submodule add https://github.com/ggerganov/whisper.cpp app/src/main/cpp/whisper
+   git submodule update --init app/src/main/cpp/whisper
    ```
-3. Open the project in Android Studio and let it sync (it will fetch the Gradle wrapper once). Run on an arm64-v8a device or an x86_64 emulator.
-4. First run: allow the microphone → settings → **⤓ Download ggml-base.en-q5_1.bin** → paste your cloud key + model → ⚡ Test connection → back out and record.
+   (`whisper.cpp` is a git submodule — clone with `--recurse-submodules` and skip this.)
+3. Open the project, let it sync, run on an arm64-v8a device (or x86_64 emulator).
+4. First run: allow microphone (+ notifications) → settings → **⤓ download a whisper model** → paste your cloud key/base URL/model → ⚡ Test connection → back out and record.
 
 ## Conventions
 
 - Kotlin + Compose (Material3), no third-party UI libs; OkHttp is the only network dependency; `org.json` (platform-embedded) for JSON — keeping the desktop repo's "no surprise dependencies" ethos.
 - Everything under `filesDir/data` mirrors the desktop tree; never commit or sync that directory.
-- The prompt texts are cross-repo-locked to `transcribe-livenotes`' `server/ai/prompts.js` — an intentional duplication with a sync comment on both sides.
+- Prompt texts are cross-repo-locked to `transcribe-livenotes`' [`server/ai/prompts.js`](https://github.com/SynesisLab/transcribe-livenotes/blob/main/server/ai/prompts.js) — an intentional duplication with a sync comment on both sides (the session-topic fold-in uses the desktop's exact `profileCtx` shape).
 
 ## License
 
