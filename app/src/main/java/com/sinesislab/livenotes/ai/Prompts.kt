@@ -14,7 +14,10 @@ object Prompts {
     // ---------------------------------------------------------------- live notes
     // Incremental: existing bullets in, ONLY new bullets out — the notes grow
     // as the session progresses, exactly like the desktop's auto-notes job.
-    fun autoNotesSystem(existing: String): String = buildString {
+    /** The live-notes system prompt; `topic` folds in as the session context
+     *  under the desktop's exact shape (`base\n\nSession context:\n<ctx>`) so
+     *  the bullets anchor to what the meeting is about. */
+    fun autoNotesSystem(existing: String, topic: String? = null): String = buildString {
         append(
             "You are a note-taking assistant embedded in a live transcription app. You maintain a \"Live notes\" section that grows " +
                 "incrementally as a session progresses. You receive the current notes (your previous bullets) and a chunk of NEW " +
@@ -23,6 +26,7 @@ object Prompts {
                 "reorganize existing notes. Never output headings, preamble, or explanations. If the new material adds nothing " +
                 "of value, output nothing at all."
         )
+        if (!topic.isNullOrBlank()) append("\n\nSession context:\n").append(topic)
     }
 
     fun autoNotesUser(existing: String, newMaterial: String): String = buildString {

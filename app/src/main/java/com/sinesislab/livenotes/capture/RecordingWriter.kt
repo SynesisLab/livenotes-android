@@ -21,6 +21,7 @@ import java.io.RandomAccessFile
 class RecordingWriter(private val file: File, private val sampleRate: Int) {
     private var raf: RandomAccessFile? = null
     private var pack = ByteArray(0)
+    @Volatile private var written: Long = 0
 
     /** Create the WAV — or, resuming after a crash, re-open the existing
      *  file and append. False means recording is not possible at all. */
@@ -60,12 +61,17 @@ class RecordingWriter(private val file: File, private val sampleRate: Int) {
                 pack[i++] = ((v shr 8) and 0xFF).toByte()
             }
             r.write(pack, 0, count * 2)
+            written += count * 2
         } catch (e: Exception) {
             android.util.Log.e("livenotes", "recording append failed: ${e.message}")
             try { r.close() } catch (e: Exception) {}
             raf = null
         }
     }
+
+    /** PCM bytes written so far — the ⏺ clock's and the notification's time
+     *  source (the file's own length; pauses never count). */
+    fun writtenBytes(): Long = written
 
     /** Stop-and-patch; idempotent because the capture loop and the service
      *  teardown can both call it — only the first close matters, and the

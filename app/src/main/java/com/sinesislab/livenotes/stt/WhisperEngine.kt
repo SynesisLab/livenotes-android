@@ -79,7 +79,7 @@ class WhisperEngine(context: Context) {
      * all callers are background threads (the capture pool); this must never
      * be called from the main thread.
      */
-    fun transcribe(samples: FloatArray): String {
+    fun transcribe(samples: FloatArray, language: String? = null): String {
         // WAIT for a load to finish rather than dropping the utterance: a
         // settings-page model selection lands mid-session (the engine flips
         // through `loading`), and every utterance executing in that window
@@ -94,7 +94,12 @@ class WhisperEngine(context: Context) {
             break
         }
         if (_state.value.state != LoadState.READY) return ""
-        val native = executor.submit<String> { WhisperJni.fullTranscribe(samples, SAMPLE_RATE, settings.whisperLanguage) }
+        // the session code maps engine-side: both what the engine's language
+        // param wants and the script-prompt come from SttLanguages
+        val sessionLang = language ?: settings.whisperLanguage
+        val native = executor.submit<String> {
+            WhisperJni.fullTranscribe(samples, SAMPLE_RATE, SttLanguages.engineLanguage(sessionLang), SttLanguages.promptFor(sessionLang))
+        }
         return try {
             native.get().replace(Regex("\\s+"), " ").trim()
         } catch (e: java.util.concurrent.ExecutionException) {

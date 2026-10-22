@@ -8,5 +8,5 @@ object WhisperJni {
 
     external fun init(modelPath: String, threads: Int): Boolean
     external fun free()
-    external fun fullTranscribe(samples: FloatArray, sampleRate: Int, language: String): String
+    external fun fullTranscribe(samples: FloatArray, sampleRate: Int, language: String, prompt: String): String
 }

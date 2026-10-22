@@ -1,6 +1,8 @@
 package com.sinesislab.livenotes.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.MaterialTheme
@@ -35,12 +38,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -58,6 +59,7 @@ import com.sinesislab.livenotes.ai.Prompts
 import com.sinesislab.livenotes.capture.AutoNotesState
 import com.sinesislab.livenotes.capture.CaptureBus
 import com.sinesislab.livenotes.capture.CaptureService
+import com.sinesislab.livenotes.capture.RecordingLive
 import com.sinesislab.livenotes.capture.RecordingWriter
 import com.sinesislab.livenotes.stt.WhisperEngine
 import com.sinesislab.livenotes.store.SessionStore
@@ -153,6 +155,12 @@ private fun ListScreen(container: AppContainer, onNew: () -> Unit, onOpen: (Stri
                 content = {
                     Box(
                         Modifier
+                            // fillMaxWidth is not cosmetic: without it the
+                            // clickable Box is CONTENT-sized (the title's
+                            // width) — taps anywhere right of ~the title
+                            // landed on dead card surface ("it has to be the
+                            // far left to trigger")
+                            .fillMaxWidth()
                             .combinedClickable(
                                 onClick = { if (inSelection) selection = selection.toggle(s.slug) else onOpen(s.slug) },
                                 onLongClick = { selection = selection + s.slug },
@@ -169,6 +177,13 @@ private fun ListScreen(container: AppContainer, onNew: () -> Unit, onOpen: (Stri
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (s.slug == CaptureService.activeSlug) {
+                                Text(
+                                    "⏺ recording live",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
                         }
                     }
                 },
@@ -197,22 +212,29 @@ private fun ListScreen(container: AppContainer, onNew: () -> Unit, onOpen: (Stri
 
 private fun Set<String>.toggle(v: String): Set<String> = if (v in this) this - v else this + v
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> Unit) {
     val context = LocalContext.current
     val sessions = container.sessions
     var session by remember { mutableStateOf(if (slug.isBlank()) null else sessions.get(slug)) }
-    var mode by remember { mutableStateOf(if (slug.isBlank()) "idle" else "ended") } // idle | recording | ended
+    // a session whose capture service still runs re-opens straight into
+    // recording mode (the user left the screen mid-session)
+    var mode by remember { mutableStateOf(if (slug.isBlank()) "idle" else if (slug == CaptureService.activeSlug) "recording" else "ended") } // idle | recording | ended
     // the back gesture follows the same rule as the back button: free to
     // leave except mid-session (an accidental swipe shouldn't feel like it
     // ended the recording — the service would happily keep recording anyway)
     androidx.activity.compose.BackHandler(enabled = mode != "recording") { onBack() }
     var title by remember { mutableStateOf("") }
+    var topic by remember { mutableStateOf("") }
+    var renaming by remember { mutableStateOf(false) }
+    var renameText by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val lines by CaptureBus.transcript.collectAsState()
     val notes by CaptureBus.notes.collectAsState()
     val engine by container.whisper.state.collectAsState()
     val recordingLive by CaptureBus.recording.collectAsState()
+    val wrapUp by CaptureBus.wrapUp.collectAsState()
 
     // entering an existing session: the files fill the bus
     LaunchedEffect(session?.slug) {
@@ -220,14 +242,41 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
         CaptureBus.transcript.value = sessions.transcriptLines(s)
         CaptureBus.notes.value = AutoNotesState(sessions.loadAutonotes(s), null, busy = false)
     }
+    // the notification's ■ End (or the system) can close the session from
+    // outside the screen — follow the service out of recording mode, but only
+    // once its stream has actually opened (the null-before-open window at a
+    // fresh start must not flip it). The wrap-up stages ride the same effect:
+    // End opens the wrapping-up panel from either entry point, and the done
+    // state flips it to the ended tabs (consuming itself).
+    var recStarted by remember { mutableStateOf(false) }
+    LaunchedEffect(recordingLive, mode, wrapUp) {
+        if (recordingLive != null) recStarted = true
+        if (recordingLive == null && recStarted && (mode == "recording" || mode == "wrapping")) mode = "ended"
+        val w = wrapUp
+        if (w != null) {
+            if (w.transcriptDone && w.notesDone) {
+                CaptureBus.wrapUp.value = null
+                if (mode == "recording" || mode == "wrapping") mode = "ended"
+            } else if (mode == "recording") {
+                mode = "wrapping"
+            }
+        }
+    }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (mode != "recording") TextButton(onClick = onBack) { Text("← back") }
+            // ended sessions: tap the title to rename it (✎ is the cue; the
+            // slug — and every file path — stays as the id)
             Text(
-                session?.title ?: "New recording",
+                (session?.title ?: "New recording") + if (mode == "ended") " ✎" else "",
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
+                modifier = if (mode == "ended") {
+                    Modifier.clickable { renameText = session?.title ?: ""; renaming = true }
+                } else {
+                    Modifier
+                },
             )
             Spacer(Modifier.weight(1f))
             val base = when (engine.state) {
@@ -255,11 +304,65 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                 modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
                 singleLine = true,
             )
+            // the TOPIC is a separate item from the name: it isn't displayed
+            // anywhere — it's the context the live-notes AI and the
+            // re-analysis receive, so the notes stay anchored to what the
+            // meeting is actually about
+            OutlinedTextField(
+                value = topic,
+                onValueChange = { topic = it },
+                label = { Text("Session topic (optional)") },
+                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                singleLine = true,
+            )
+            // PER-SESSION language: each session carries its own (the topic
+            // goes to the AI as session context; the global whisper setting
+            // stays as the device default)
+            var lang by remember { mutableStateOf("auto") }
+            // a FlowRow, not a fixed Row: six language entries overflow one phone line
+            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 10.dp)) {
+                listOf(
+                    "auto" to "Auto",
+                    "en" to "English",
+                    "zh-Hant" to "繁體中文",
+                    "ja" to "日本語",
+                    "es" to "Español",
+                ).forEach { (code, label) ->
+                    val active = lang == code
+                    ElevatedButton(
+                        onClick = { lang = code },
+                        enabled = !active,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    ) { Text(if (active) "🔒 $label" else label, style = MaterialTheme.typography.labelMedium) }
+                }
+            }
+            // PER-SESSION live notes, chosen at start (default ON): decided
+            // here, applied to just this capture — and still flippable
+            // mid-session from the recording row
+            var notesForSession by remember { mutableStateOf(CaptureBus.notesEnabled.value) }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 10.dp)) {
+                ElevatedButton(
+                    onClick = { notesForSession = !notesForSession },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        if (notesForSession) "✨ live notes ON" else "📝 transcript only",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                Text(
+                    "AI notes for this session",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 10.dp),
+                )
+            }
             Button(
                 onClick = {
                     scope.launch {
-                        val meta = sessions.create(title.trim())
+                        val meta = sessions.create(title.trim(), lang, topic.trim())
                         session = meta
+                        CaptureBus.notesEnabled.value = notesForSession
                         CaptureBus.transcript.value = emptyList()
                         CaptureService.start(context, meta.slug)
                         mode = "recording"
@@ -286,8 +389,18 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                 ) { Text(if (notesEnabled) "✨ live notes ON" else "📝 transcript only", style = MaterialTheme.typography.labelMedium) }
                 Spacer(Modifier.weight(1f))
-                // the ⏺ clock: the session's audio-recording, surfaced live
-                recordingLive?.let { RecordingClock(it.startedAtEpoch, Modifier.padding(start = 8.dp)) }
+                recordingLive?.let { live ->
+                    // the ⏺ clock: the session's audio-recording, surfaced live
+                    RecordingClock(
+                        live,
+                        sessions.recordingFile(session?.slug ?: ""),
+                        Modifier.padding(start = 8.dp),
+                    )
+                    ElevatedButton(
+                        onClick = { CaptureService.togglePause(context) },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    ) { Text(if (live.paused) "▶ Resume" else "⏸ Pause", style = MaterialTheme.typography.labelMedium) }
+                }
             }
             if (notesEnabled) {
                 // weight-constrained panes: an unbounded LazyColumn child grows
@@ -299,17 +412,56 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                         Text("LIVE NOTES", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         if (notes.busy) Text("  ● AI writing", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
-                    // the AI notes are markdown — render them as markdown
-                    MarkdownBlock(notes.content.ifBlank { "*AI notes appear within ~20 s of speech…*" }, Modifier.weight(1f).padding(top = 4.dp))
+                    // the AI notes are markdown — rendered in a SCROLLING pane:
+                    // a bare MarkdownBlock clips everything past its weight
+                    // share once notes outgrow the screen
+                    MarkedScroll(
+                        notes.content.ifBlank { "*AI notes appear within ~20 s of speech…*" },
+                        Modifier.weight(1f).padding(top = 4.dp),
+                    )
                 }
             } else {
                 // transcript takes the whole body
                 LiveTranscriptPane(Modifier.weight(1f).fillMaxWidth().padding(top = 10.dp))
             }
             Button(
-                onClick = { CaptureService.stop(context); mode = "ended" },
+                // the wind-down is its own mode: the queued transcript drains
+                // and the final notes pass show real progress, then the tabs
+                onClick = { CaptureService.end(context); mode = "wrapping" },
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
             ) { Text("■ End session") }
+        }
+
+        if (mode == "wrapping") {
+            // the wind-down, shown not assumed: the loop's tail flushes, the
+            // queued utterances drain onto the transcript, one forced notes
+            // pass runs, and only then do the ended tabs open
+            Column(Modifier.fillMaxWidth().padding(top = 24.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp))
+                    Text("wrapping up…", modifier = Modifier.padding(start = 10.dp))
+                }
+                Text(
+                    if (wrapUp?.transcriptDone == true) "✓ transcript complete" else "… draining the transcription queue",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (wrapUp?.transcriptDone == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+                Text(
+                    if (wrapUp?.notesDone == true) "✓ notes complete" else "… final live-notes pass",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (wrapUp?.notesDone == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                recordingLive?.let { live ->
+                    Text(
+                        "⏺ ${clock(live.recordedMs.toInt())} of audio kept",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+            }
         }
 
         if (mode == "ended") {
@@ -319,6 +471,33 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
                 TextButton(onClick = onBack, modifier = Modifier.padding(top = 4.dp)) { Text("← all sessions") }
             }
         }
+    }
+    // rename-after-the-fact: only the title changes; slug, files and history
+    // stay put — the list picks the new title up on the way back
+    if (renaming) {
+        AlertDialog(
+            onDismissRequest = { renaming = false },
+            title = { Text("Rename session") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { if (it.length <= 120) renameText = it },
+                    label = { Text("Session title") },
+                    singleLine = true,
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val sl = session?.slug
+                    if (sl != null) {
+                        sessions.rename(sl, renameText)
+                        session = sessions.get(sl)
+                    }
+                    renaming = false
+                }) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+        )
     }
 }
 
@@ -330,20 +509,30 @@ private fun SessionScreen(container: AppContainer, slug: String, onBack: () -> U
 private fun LiveTranscriptPane(modifier: Modifier = Modifier) {
     val lines by CaptureBus.transcript.collectAsState()
     val listState = rememberLazyListState()
-    // desktop-style follow-the-tail: ON while streaming, released when the
-    // user scrolls up, re-armed when they read their way back to the bottom.
-    // A from-scratch "am I at the bottom?" check would stop permanently the
-    // moment content first overflows (the list sits at the top until this
-    // state says otherwise).
+    // Follow-the-tail v2. The v1 visibility heuristic (follow = "last visible
+    // item was the last item") stuck at the top on re-entering a long session
+    // and on wrapped long lines the moment content overflowed, and the v1
+    // animate-scroll mid-flight layout reads made it worse. Contract now:
+    // the ONLY thing that lifts the pin is the user's own drag; the only
+    // thing that re-arms it is dragging back to the tail; each new line SNAPS
+    // instantly (a million-pixel offset is clamped into the item — wrapped
+    // tails and all).
     var follow by remember { mutableStateOf(true) }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.layoutInfo }.collect { info ->
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            follow = info.totalItemsCount <= 1 || last >= info.totalItemsCount - 1
+        listState.interactionSource.interactions.collect { i ->
+            when (i) {
+                is DragInteraction.Start -> follow = false
+                is DragInteraction.Stop, is DragInteraction.Cancel -> {
+                    val info = listState.layoutInfo
+                    val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                    follow = info.totalItemsCount <= 1 || last >= info.totalItemsCount - 1
+                }
+                else -> {}
+            }
         }
     }
     LaunchedEffect(lines.size) {
-        if (follow && lines.isNotEmpty()) listState.animateScrollToItem(lines.size - 1)
+        if (follow && lines.isNotEmpty()) listState.scrollToItem(lines.size - 1, 1_000_000)
     }
     ElevatedCard(modifier = modifier) {
         if (lines.isEmpty()) {
@@ -366,11 +555,15 @@ private fun LiveTranscriptPane(modifier: Modifier = Modifier) {
  *  the ✨ comprehensive re-analysis (streamed; runs kept as files), and the
  *  session's own recording (▶ Audio). Each exports via the share-sheet —
  *  the audio as an actual .wav file. */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier = Modifier) {
     var tab by remember { mutableStateOf("transcript") }
     Column(modifier) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // a FlowRow, not a fixed Row: with the fourth tab added, the Row
+        // overflowed and the ▶ Audio pill rendered as a BLANK sliver (the
+        // "white pill" bug) — wrapping is the honest fix at any phone width
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(
                 "transcript" to "Transcript",
                 "notes" to "Live notes",
@@ -386,8 +579,11 @@ private fun EndedTabs(container: AppContainer, slug: String, modifier: Modifier 
                 ExportRow(container, slug, kind = "transcript")
             }
             "notes" -> {
-                // the AI bullets are markdown
-                MarkdownBlock(container.sessions.loadAutonotes(slug).ifBlank { "*(the AI has no notes yet for this session)*" }, Modifier.weight(1f).padding(top = 10.dp))
+                // the AI bullets are markdown — scrolled like the live pane
+                MarkedScroll(
+                    container.sessions.loadAutonotes(slug).ifBlank { "*(the AI has no notes yet for this session)*" },
+                    Modifier.weight(1f).padding(top = 10.dp),
+                )
                 ExportRow(container, slug, kind = "notes")
             }
             "analysis" -> AnalysisPane(container, slug, Modifier.weight(1f).padding(top = 10.dp))
@@ -529,23 +725,35 @@ private fun EndedTranscript(container: AppContainer, slug: String, modifier: Mod
     }
 }
 
-/** The live ⏺ clock: elapsed since the session's audio stream opened, ticking
- *  while shown — the recording feature surfaced in real time. */
+/** The live ⏺ clock — built the unbreakable way: it stats the WAV's own
+ *  length every second (the file is ground truth; no flow can lag behind it).
+ *  `paused` comes off the bus so the frozen value shows ⏸. */
 @Composable
-private fun RecordingClock(startedAtEpoch: Long, modifier: Modifier = Modifier) {
-    var now by remember { mutableLongStateOf(startedAtEpoch) }
-    LaunchedEffect(startedAtEpoch) {
+private fun RecordingClock(live: RecordingLive, file: File, modifier: Modifier = Modifier) {
+    var tickMs by remember {
+        mutableIntStateOf((maxOf(0L, file.length() - RecordingWriter.HEADER_BYTES) / 32).toInt())
+    }
+    LaunchedEffect(file, live.paused) {
         while (true) {
-            now = System.currentTimeMillis()
+            tickMs = (maxOf(0L, file.length() - RecordingWriter.HEADER_BYTES) / 32).toInt()
             delay(1000)
         }
     }
     Text(
-        "⏺ ${clock((now - startedAtEpoch).toInt().coerceAtLeast(0))}",
+        "${if (live.paused) "⏸" else "⏺"} ${clock(tickMs)}",
         style = MaterialTheme.typography.labelMedium,
         color = MaterialTheme.colorScheme.error,
         modifier = modifier,
     )
+}
+
+/** Markdown inside a vertical-scroll pane — the raw MarkdownBlock clips any
+ *  content past its weight share (long sessions outgrow the screen). */
+@Composable
+private fun MarkedScroll(text: String, modifier: Modifier = Modifier) {
+    Column(modifier.verticalScroll(rememberScrollState())) {
+        MarkdownBlock(text)
+    }
 }
 
 /** The ▶ Audio tab: the session's recording.wav — the capture loop streamed
@@ -695,7 +903,7 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
                             val acc = StringBuilder()
                             CloudAi.chatStream(
                                 model = settings.model,
-                                systemPrompt = Prompts.analysisSystem(null),
+                                systemPrompt = Prompts.analysisSystem(container.sessions.get(slug)?.topic),
                                 userPrompt = Prompts.analysisUser(null, transcript),
                                 api = settings.api,
                                 baseUrl = settings.baseUrl,
@@ -746,6 +954,7 @@ private fun AnalysisPane(container: AppContainer, slug: String, modifier: Modifi
 
 // (no helper needed — fixed-height panes keep the layout stable)
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
     androidx.activity.compose.BackHandler { onBack() }
@@ -912,11 +1121,11 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
         }
 
         Text("Language", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
+        androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
             listOf(
                 "auto" to "Auto",
                 "en" to "English",
-                "zh" to "中文",
+                "zh-Hant" to "繁體中文",
                 "ja" to "日本語",
                 "es" to "Español",
             ).forEach { (code, label) ->
@@ -930,7 +1139,7 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
         }
         // any other of whisper's ~90 language codes
         OutlinedTextField(
-            value = settings.whisperLanguage.takeUnless { it in listOf("", "auto", "en", "zh", "ja", "es") } ?: "",
+            value = settings.whisperLanguage.takeUnless { it in listOf("", "auto", "en", "zh", "zh-Hant", "ja", "es") } ?: "",
             onValueChange = { code -> if (code.length <= 6) settings.whisperLanguage = code.trim() },
             label = { Text("Other language code (e.g. fr, de, ko…)") },
             modifier = Modifier.fillMaxWidth().padding(top = 6.dp),

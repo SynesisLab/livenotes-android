@@ -30,7 +30,14 @@ class SessionStore(context: Context) {
     private val time = SimpleDateFormat("HH:mm", Locale.getDefault())
     private val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
 
-    data class Meta(val slug: String, val title: String, val createdAt: String, val updatedAt: String)
+    data class Meta(
+        val slug: String,
+        val title: String,
+        val createdAt: String,
+        val updatedAt: String,
+        val language: String = "", // per-session STT language; blank = the device default
+        val topic: String = "", // the session's topic — the AI's session context (NOT the display title)
+    )
 
     private var index: List<MutableMap<String, String>> = loadIndex()
 
@@ -44,6 +51,8 @@ class SessionStore(context: Context) {
                         "title" to o.getString("title"),
                         "createdAt" to o.getString("createdAt"),
                         "updatedAt" to o.getString("updatedAt"),
+                        "language" to o.optString("language", ""),
+                        "topic" to o.optString("topic", ""),
                     )
                 }
             }
@@ -61,26 +70,32 @@ class SessionStore(context: Context) {
                     .put("title", m["title"])
                     .put("createdAt", m["createdAt"])
                     .put("updatedAt", m["updatedAt"])
+                    .put("language", m["language"] ?: "")
+                    .put("topic", m["topic"] ?: "")
             )
         }
         indexFile.writeText(arr.toString(2))
     }
 
     val all: List<Meta>
-        get() = index.map { Meta(it["slug"]!!, it["title"]!!, it["createdAt"]!!, it["updatedAt"]!!) }
-            .sortedByDescending { it.updatedAt }
+        get() = index.map {
+            Meta(it["slug"]!!, it["title"]!!, it["createdAt"]!!, it["updatedAt"]!!, it["language"] ?: "", it["topic"] ?: "")
+        }.sortedByDescending { it.updatedAt }
 
-    /** Create a session; slugs are unique by construction (slug-2, slug-3…). */
-    fun create(title: String): Meta {
+    /** Create a session; slugs are unique by construction (slug-2, slug-3…).
+     *  Topic and language ride with the session; nothing global is implied. */
+    fun create(title: String, language: String = "", topic: String = ""): Meta {
         val t = title.ifBlank { "Session ${stamp.format(Date())}" }
         val now = isoNow()
         val slug = uniqueSlug(slugify(t))
-        val meta = Meta(slug, t, now, now)
+        val meta = Meta(slug, t, now, now, language, topic)
         index = index + mutableMapOf(
             "slug" to slug,
             "title" to t,
             "createdAt" to now,
             "updatedAt" to now,
+            "language" to language,
+            "topic" to topic,
         )
         saveIndex()
         File(sessionsDir, slug).mkdirs()
@@ -90,6 +105,23 @@ class SessionStore(context: Context) {
     }
 
     fun get(slug: String): Meta? = all.firstOrNull { it.slug == slug }
+
+    /** Post-hoc rename: title only — the slug (and its directory, and every
+     *  file path) stays as the id; list cards pick the new title up. */
+    fun rename(slug: String, title: String) {
+        val t = title.trim()
+        if (t.isBlank()) return
+        index = index.map {
+            if (it["slug"] == slug) {
+                it["title"] = t
+                it["updatedAt"] = isoNow()
+                it
+            } else {
+                it
+            }
+        }
+        saveIndex()
+    }
 
     fun delete(slug: String) {
         index = index.filter { it["slug"] != slug }

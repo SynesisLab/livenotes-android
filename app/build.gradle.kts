@@ -9,7 +9,8 @@ plugins {
 
 android {
     namespace = "com.sinesislab.livenotes"
-    compileSdk = 35
+    // 36 = Android 16: unlocks Notification.ProgressStyle for live notifications
+    compileSdk = 36
     // installed locally (Android Studio's SDK dir) — matches the default's range
     ndkVersion = "28.2.13676358"
 
@@ -17,8 +18,8 @@ android {
         applicationId = "com.sinesislab.livenotes"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 9
+        versionName = "0.1.8"
         ndk {
             // arm64-v8a is the only real-device target; x86_64 keeps emulation usable
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -60,7 +61,9 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.15.0")
+    // 1.17 = the first stable with NotificationCompat.ProgressStyle +
+    // setRequestPromotedOngoing (1.18/1.19 require AGP 9.x — out of reach here)
+    implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))

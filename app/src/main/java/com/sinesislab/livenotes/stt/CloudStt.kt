@@ -82,11 +82,18 @@ object CloudStt {
     ): String {
         val base = baseUrl.trim().trimEnd('/')
         val url = if (base.endsWith("/audio/transcriptions")) base else "$base/audio/transcriptions"
+        // engine-side mapping, same rule as whisper: what the API wants +
+        // the script-anchoring prompt for Traditional Chinese
         val body = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", "speech.wav", encodeWav(samples, sampleRate).toRequestBody("audio/wav".toMediaType()))
             .addFormDataPart("model", model)
-            .apply { if (language.isNotBlank() && language != "auto") addFormDataPart("language", language) }
+            .apply {
+                val eng = SttLanguages.engineLanguage(language)
+                if (eng.isNotBlank() && eng != "auto") addFormDataPart("language", eng)
+                val prompt = SttLanguages.promptFor(language)
+                if (prompt.isNotBlank()) addFormDataPart("prompt", prompt)
+            }
             .build()
         val req = Request.Builder()
             .url(url)

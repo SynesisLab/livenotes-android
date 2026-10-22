@@ -7,6 +7,8 @@
     <!-- API 34+ requires the typed microphone foreground-service permission -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 16 live notifications: opt-in for the promoted (live) template -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
 
     <application

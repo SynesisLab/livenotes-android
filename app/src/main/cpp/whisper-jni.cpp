@@ -48,7 +48,7 @@ Java_com_sinesislab_livenotes_stt_WhisperJni_free(JNIEnv *, jobject)
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_sinesislab_livenotes_stt_WhisperJni_fullTranscribe(
     JNIEnv *env, jobject,
-    jfloatArray jSamples, jint sampleRate, jstring jLanguage)
+    jfloatArray jSamples, jint sampleRate, jstring jLanguage, jstring jPrompt)
 {
     if (!g_ctx)
         return env->NewStringUTF("");
@@ -70,6 +70,20 @@ Java_com_sinesislab_livenotes_stt_WhisperJni_fullTranscribe(
     if (lang)
         env->ReleaseStringUTFChars(jLanguage, lang);
     params.language = language.c_str();
+
+    // the conditioning prompt (script anchoring — e.g. Traditional Chinese):
+    // whisper.cpp tokenizes it even with no_context above (only the prompt
+    // HISTORY is cleared), and carry_initial_prompt re-injects it into every
+    // 30 s window so longer utterances keep the asked-for script
+    const char *pr = jPrompt ? env->GetStringUTFChars(jPrompt, nullptr) : nullptr;
+    if (pr && pr[0])
+    {
+        const std::string prompt = std::string(pr);
+        params.initial_prompt = prompt.c_str();
+        params.carry_initial_prompt = true;
+    }
+    if (pr)
+        env->ReleaseStringUTFChars(jPrompt, pr);
 
     // current whisper.cpp takes the params struct BY VALUE
     const int rc = whisper_full(g_ctx, params, samples, n);
