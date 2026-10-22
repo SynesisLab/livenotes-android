@@ -174,6 +174,51 @@ object CloudAi {
         }
     }
 
+    /**
+     * The provider's own model list, the way the user sees it: OpenAI-style
+     * `GET {base}/models` (data[].id), Anthropic's the same shape with its
+     * headers, Ollama's `GET {base}/api/tags` (models[].name/model). BLOCKING
+     * — settings screens call it on IO. Throws with a readable message; the
+     * caller treats that the same as a failed test-connection.
+     */
+    fun listModelsBlocking(api: String, baseUrl: String, apiKey: String?): List<String> {
+        val base = baseUrl.trim().trimEnd('/')
+        val host = try { java.net.URI(base).host ?: base } catch (e: Exception) { base }
+        val anthropic = api == "anthropic"
+        val url = when (api) {
+            "anthropic" -> "$base/models"
+            "ollama" -> if (base.endsWith("/api")) "$base/tags" else "$base/api/tags"
+            else -> "$base/models"
+        }
+        val req = Request.Builder().url(url).apply {
+            if (anthropic) {
+                header("anthropic-version", "2023-06-01")
+                if (!apiKey.isNullOrBlank()) header("x-api-key", apiKey)
+            } else if (!apiKey.isNullOrBlank()) {
+                header("Authorization", "Bearer $apiKey")
+            }
+        }.build()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) throw java.io.IOException(readError(res, host))
+            val j = JSONObject(res.body?.string() ?: "{}")
+            val arr: JSONArray = when (api) {
+                "ollama" -> j.optJSONArray("models") ?: JSONArray()
+                else -> j.optJSONArray("data") ?: JSONArray()
+            }
+            val out = ArrayList<String>()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val id = o.optString("id").takeIf { it.isNotBlank() }
+                    ?: o.optString("name").takeIf { it.isNotBlank() }
+                    ?: o.optString("model").takeIf { it.isNotBlank() }
+                    ?: continue
+                out.add(id)
+            }
+            if (out.isEmpty()) throw java.io.IOException("the provider listed no models")
+            return out.distinct()
+        }
+    }
+
     private fun readError(res: okhttp3.Response, what: String): String {
         val body = try { res.body?.string() ?: "" } catch (e: Exception) { "" }
         return try {

@@ -867,6 +867,52 @@ private fun AudioPane(container: AppContainer, slug: String, modifier: Modifier 
     }
 }
 
+/** "⤓ Fetch models" + the provider's own list as tap-to-fill chips — shared
+ *  by the notes-AI model field and the STT model field, so nobody has to
+ *  hand-type a model name the host already knows. The key used is whatever
+ *  was typed, else the stored one. */
+@Composable
+private fun ModelFetcher(api: String, baseUrl: String, typedKey: String, label: String, onPick: (String) -> Unit, onMessage: (String?) -> Unit) {
+    val scope = rememberCoroutineScope()
+    var fetching by remember { mutableStateOf(false) }
+    var models by remember { mutableStateOf<List<String>?>(null) }
+    TextButton(
+        onClick = {
+            onMessage(null)
+            fetching = true
+            scope.launch {
+                val msg: String? = withContext(Dispatchers.IO) {
+                    try {
+                        val list = CloudAi.listModelsBlocking(api, baseUrl, typedKey.takeIf { it.isNotBlank() })
+                        models = list
+                        "✓ ${list.size} models — tap one below"
+                    } catch (e: Exception) {
+                        val reason = e.message ?: "fetch failed"
+                        models = null
+                        "✗ ${reason.take(200)}"
+                    }
+                }
+                onMessage(msg)
+                fetching = false
+            }
+        },
+    ) { Text(if (fetching) "fetching…" else "⤓ Fetch $label models") }
+    models?.let { list ->
+        androidx.compose.foundation.layout.FlowRow(
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(top = 4.dp),
+        ) {
+            list.take(40).forEach { name ->
+                ElevatedButton(
+                    onClick = { onPick(name) },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                ) { Text(name.take(30), style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+            }
+        }
+    }
+}
+
 /** m:ss (h:mm:ss past the hour) — one clock for the live ⏺ chip and the
  *  Audio tab alike. */
 private fun clock(ms: Int): String {
@@ -1013,6 +1059,14 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             singleLine = true,
         )
+        ModelFetcher(
+            api = api,
+            baseUrl = baseUrl,
+            typedKey = keyInput.ifBlank { settings.apiKey.orEmpty() },
+            label = "notes-AI",
+            onPick = { model = it },
+            onMessage = { message = it },
+        )
         ElevatedButton(
             onClick = {
                 if (keyInput.isNotBlank()) settings.apiKey = keyInput
@@ -1085,6 +1139,14 @@ private fun SettingsScreen(container: AppContainer, onBack: () -> Unit) {
                 label = { Text("STT model (whisper-1, gpt-4o-transcribe…)") },
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                 singleLine = true,
+            )
+            ModelFetcher(
+                api = api,
+                baseUrl = baseUrl,
+                typedKey = keyInput.ifBlank { settings.apiKey.orEmpty() },
+                label = "transcription",
+                onPick = { sttModel = it; settings.cloudSttModel = it.trim() },
+                onMessage = { message = it },
             )
         }
         Text("Fallback: on-device whisper", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 18.dp))
